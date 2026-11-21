@@ -1,0 +1,82 @@
+[
+ {
+  "trigger": "CodePipelineのパイプライン失敗をSlack #devopsへ通知（全パイプライン）",
+  "answer": "EventBridgeでCodePipeline Pipeline Execution FAILEDを拾う→ターゲットはLambda→Slack Incoming WebhookへPOST （Stage/Action粒度は通知過多）"
+ },
+ {
+  "trigger": "Lambdaデプロイ短縮＋エラー検出・ロールバック自動化",
+  "answer": "SAM＋CodeDeployトラフィックシフト＋pre/postフック＋CWアラームで自動ロールバック （手動オリジン切替・変更セット案は✕。pre/postフックはCodeDeploy用語）"
+ },
+ {
+  "trigger": "デプロイ中に自動テスト＋失敗で即・前バージョンへ自動ロールバック（CodeDeploy×EC2）",
+  "answer": "デプロイグループで自動ロールバック有効化＋appspecのValidateServiceフックでテスト （失敗＝デプロイ失敗→組み込みで巻き戻し。ValidateService＝EC2用に実在、Lambda用はBefore/AfterAllowTrafficのみ）。stop-deployment＋再デプロイ・アラーム→Lambda再デプロイ＝手作り配管✕、OneAtATime＋手動承認＝人力✕"
+ },
+ {
+  "trigger": "ECS×CodeDeployで一部トラフィックだけ新バージョン検証＋応答時間悪化で迅速に自動ロールバック",
+  "answer": "CodeDeployDefault.ECSCanary10Percent5Minutes＋応答時間のCWアラームをデプロイグループに関連付け＋自動ロールバック有効化 。AllAtOnce＋Lambdaロールバック＝手作り✕、Linear＋BeforeAllowTrafficでテスト＝トラフィック前は応答時間測れん✕、ALB手動＋Step Functions＝手組み✕"
+ },
+ {
+  "trigger": "Configドリフトルール＝NON\\_COMPLIANTやのにコンソール＝IN\\_SYNC",
+  "answer": "スロットリングの誤検出＝無視してよい （ルールはDetectStackDrift頼み）。 カスタムリソースのドリフト検出は非サポート"
+ },
+ {
+  "trigger": "Control Tower＋Terraformのナレッジでアカウント発行〜OU配置〜ベースラインを自動完結",
+  "answer": "AFT（Account Factory for Terraform）一択 ＝専用TerraformリポジトリにアカウントリクエストをPush→マネージドパイプラインが全自動。CFN派＝CfCT／Terraform派＝AFT。Organizations API自前パイプライン＝統制迂回、「手動アップロード」カスタムオーケストレーター＝✕"
+ },
+ {
+  "trigger": "組織全アカウントに監査IAMロール＋Configルールをデプロイ＋新規アカウントも自動",
+  "answer": "管理or委任管理者アカウントでサービスマネージド型StackSet＋自動デプロイ有効化＋組織ルートをターゲット 。SCPで作成を強制＝SCPはリソースを作れん✕、EventBridge＋Lambda＋AssumeRole＝自前配管✕、セルフマネージド＋新規のたびSSMランブック＝手作業残存✕"
+ },
+ {
+  "trigger": "ECS + ASG（LaunchConfiguration）をCFNで構築→EC2が誤ったECSクラスターにリンク",
+  "answer": "LaunchConfigurationのUserDataに echo ECS_CLUSTER=XXX >> /etc/ecs/ecs.config （ECSエージェントは起動時に/etc/ecs/ecs.configを読む——書いてなければdefaultに登録。 AWS::EC2::Instance のUserDataはASG配下では効かない。ECS::Cluster/Serviceリソース定義では登録制御不可）"
+ },
+ {
+  "trigger": "サービスロール？SLR？IRSA？",
+  "answer": "全部ただのIAMロール 。信頼ポリシーに誰を書いたかの呼び分け"
+ },
+ {
+  "trigger": "ログが改ざんされていない・正確なイベント順序を100%証明",
+  "answer": "CloudTrailログファイル整合性検証（ダイジェスト＋ハッシュ）。Vault Lockは未来の保護で証明はできん・Configは設定変更や"
+ },
+ {
+  "trigger": "DB接続の静的パスワード廃止＋認証情報の発行元VPCとコール元VPC不一致なら拒否（3つ選択）",
+  "answer": "IAM DB認証有効化＋AWSAuthenticationPluginユーザー／SDKで署名付き認証トークン生成／rds-db:connect＋StringNotEqualsで aws:SourceVpc≠\\$\\{aws:EC2InstanceSourceVPC\\} を明示Deny 。Secrets Manager＋ローテーション＝回す≠廃止✕、aws:SourceIp＝パブリックIP基準✕、STSのVPCエンドポイント＝経路だけで判定せん✕"
+ },
+ {
+  "trigger": "ログにXが出たら 通知",
+  "answer": "メトリクスフィルター＋アラーム→SNS （MF＝ログ→メトリクス変換器）"
+ },
+ {
+  "trigger": "CloudWatchメトリクスを15ヶ月超（7年等）保持・可視化／最小の開発工数",
+  "answer": "CloudWatchメトリクスストリーム→Data Firehose→S3＋QuickSightで可視化＋Athenaで期間取得 。CWメトリクスの保持は 最長15ヶ月固定 ——「Extended Retention」＝実在せん機能✕、15分ポーリングLambda＝手作り配管✕、CWダッシュボードはS3のデータを描けん✕"
+ },
+ {
+  "trigger": "RDSのクエリ数が通常のベースラインより急増したら検知＋待機イベントなどDBエンジンレベルで根本原因特定（2つ選択）",
+  "answer": "DevOps Guru for RDS（MLでベースライン学習→異常パターン検知）＋Performance Insights（待機イベント・SQLごとにDB負荷をスライス） 。静的しきい値アラーム＝ベースライン検知にならん✕、拡張モニタリング＝OSレベルで待機イベント見えん✕、スロークエリログ＋Lambda解析＝手作り✕"
+ },
+ {
+  "trigger": "DR計画：「RTO数時間＋RPO分単位＋コスト効率」",
+  "answer": "パイロットライト：RDSクロスリージョンリードレプリカ（常時複製）＋Route 53フェイルオーバー＋昇格 （DR4段階：バックアップ＜種火＜ウォーム（RTO分単位）＜A/A（ほぼゼロ）。障害時バックアップ適用＝RPO保証できんで✕）"
+ },
+ {
+  "trigger": "S3クロスリージョンレプリケーション（CRR）の新規構成手順（3つ選択）",
+  "answer": "3点セット＝ ①両バケットでバージョニング②ソース側にルール（ターゲット＋範囲）③S3サービスプリンシパルを信頼するIAMロール 。「受信承認ルール」＝実在せん✕（被弾）、バケットポリシー＝クロスアカウントのときだけ✕（被弾）、Transfer Acceleration＝アップロード加速で別物✕"
+ },
+ {
+  "trigger": "S3の既存データ＋新規データの両方を別リージョンへレプリケート（DR）＋運用オーバーヘッド最小（2つ選択）",
+  "answer": "CRRルール（新規のみ・要バージョニング）＋S3バッチレプリケーションジョブ（既存を一括） 。EventBridge＋Lambdaコピー＝純正があるのに手作り✕、DataSyncエージェント＝S3間は不要＋CRRに運用負け✕、ライフサイクル＝クラス移行の道具で別バケット複製はできん✕"
+ },
+ {
+  "trigger": "Glueジョブのリトライ失敗（＝最終失敗）でSNS通知",
+  "answer": "EventBridge→Lambda（試行回数・イベント内容を判定）→SNS 。EventBridgeを直接SNSに繋ぐとリトライ中の失敗にも毎回通知が飛んでしまう。Personal Health Dashboard＝役割違いで✕、SQS DLQ＝要件とズレで✕"
+ },
+ {
+  "trigger": "多段ワークフロー（毎日のバックアップ等）＋条件分岐の失敗処理＋実行履歴の監査＋メール通知",
+  "answer": "Step Functions＋各ステップをLambda＋Catch/Retryで条件分岐→SNS通知 （実行履歴が標準で記録＝監査可能。単一Lambda＋Config＝Configはリソース構成の記録で実行履歴やない、EC2＋cron＝手作り・単一障害点）"
+ },
+ {
+  "trigger": "AWS認証情報が公開GitHubに漏洩→アラート＋API呼び出しレポート＋無効化／ すべての実行が監査可能",
+  "answer": "AWS HealthのAWS\\_RISK\\_CREDENTIALS\\_EXPOSEDイベントをEventBridgeで監視→Step Functionsワークフロー起動→IAM（無効化）・CloudTrail（レポート）・SNS（アラート）のAPI実行 。ソース＝Health（CloudTrailはレポート用の部品で発信元やない✕）、「監査可能な実行」＝Step Functions（Lambda単発＝実行履歴の監査に負ける✕）"
+ }
+]
