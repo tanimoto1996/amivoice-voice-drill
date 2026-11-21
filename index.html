@@ -10,11 +10,21 @@ h1 { font-size: 20px;}
 button { font-size: 18px; padding: 12px 20px; margin: 4px; border-radius: 8px;}
 #startBtn { background: #1a73e8; color: #fff; border: none;}
 #stopBtn, #skipBtn { background: #eee; border: 1px solid #999;}
+#retryBtn { background: #fff3d6; border: 1px solid #c9a227;}
+#nextBtn { background: #1a73e8; color: #fff; border: none;}
 .row { margin: 10px 0;}
-#status { font-weight: bold;}
-#heard { color: #555; min-height: 1.6em;}
-#judge { font-size: 22px; font-weight: bold; min-height: 1.6em;}
-#triggerText { background: #f4f4f4; padding: 8px; border-radius: 6px;}
+#stateLabel { font-size: 26px; font-weight: bold; text-align: center; padding: 14px 8px; border-radius: 10px; background: #eee;}
+#stateLabel.st-question { background: #e3f0ff;}
+#stateLabel.st-listen { background: #e2f5e3;}
+#stateLabel.st-judge { background: #fff3d6;}
+#stateLabel.st-ok { background: #d9f2e0; color: #137333;}
+#stateLabel.st-partial { background: #ffe9c9; color: #9a6200;}
+#stateLabel.st-ng { background: #fde3e3; color: #b3261e;}
+#stateSub { text-align: center; min-height: 1.4em; margin-top: 4px;}
+.box { background: #f7f7f7; padding: 8px 10px; border-radius: 6px; margin: 10px 0;}
+.boxlabel { font-size: 13px; font-weight: bold; color: #555; margin-bottom: 2px;}
+#heardText { color: #333; min-height: 1.6em;}
+#shortText { font-weight: bold;}
 input[type=password] { font-size: 16px; padding: 8px; width: 70%;}
 details { margin-top: 20px;}
 .small { font-size: 13px; color: #666;}
@@ -22,20 +32,37 @@ details { margin-top: 20px;}
 </head>
 <body>
 <h1>反射ドリル音声版</h1>
-<p class="small">引き金を読み上げます。声で即答してください。間違えた問題は優先的に再出題されます。</p>
+<p class="small">問題（引き金）を読み上げます。声で「要点」を答えてください。間違えた問題は優先的に再出題されます。</p>
 
 <div class="row">
 <label>進捗: <span id="progress">-</span></label><br>
 <label>正答率: <span id="rate">-</span></label>
 </div>
-<div class="row" id="status">待機中</div>
-<div class="row" id="triggerText">（ここに引き金が表示されます）</div>
-<div class="row" id="heard"></div>
-<div class="row" id="judge"></div>
+<div class="row">
+<div id="stateLabel">待機中</div>
+<div id="stateSub" class="small"></div>
+</div>
+<div class="box">
+<div class="boxlabel">問題</div>
+<div id="triggerText">（開始するとここに問題が表示されます）</div>
+</div>
+<div class="box">
+<div class="boxlabel">あなたの回答（認識結果）</div>
+<div id="heardText">（まだ回答していません）</div>
+</div>
+<div class="box" id="resultBox" style="display:none">
+<div class="boxlabel">正解の要点</div>
+<div id="shortText"></div>
+<div class="boxlabel" style="margin-top:8px">解説（即答の全文）</div>
+<div id="explainText"></div>
+<div id="judgeDetail" class="small"></div>
+</div>
 <div class="row">
 <button id="startBtn">▶ 開始</button>
 <button id="stopBtn" disabled>■ 停止</button>
 <button id="skipBtn" disabled>スキップ</button>
+<button id="retryBtn" style="display:none">↻ もう一回</button>
+<button id="nextBtn" style="display:none">次へ ▶</button>
 </div>
 
 <details>
@@ -46,7 +73,7 @@ details { margin-top: 20px;}
 <span id="keyState" class="small"></span>
 <p class="small"><button id="resetStatsBtn">成績リセット</button></p>
 <hr>
-<p class="small">ドリルの取り込み: <code>{trigger, answer}</code> の配列 JSON ファイルを選ぶと、その内容をこの端末の localStorage に保存して出題対象を切り替えます（再読み込みしても残ります）。取り込むと成績はリセットされます。</p>
+<p class="small">ドリルの取り込み: <code>{trigger, answer, short?}</code> の配列 JSON ファイルを選ぶと、その内容をこの端末の localStorage に保存して出題対象を切り替えます（再読み込みしても残ります）。<code>short</code>（声で言える要点）は任意です。無い項目は即答から自動で要点を抽出して判定します。取り込むと成績はリセットされます。</p>
 <input type="file" id="drillFileInput" accept=".json,application/json">
 <span id="drillState" class="small"></span>
 <p class="small"><button id="resetDrillsBtn">サンプルに戻す</button></p>
@@ -2106,9 +2133,8 @@ var Wrp = function () {
 }();
 
 </script>
-<script>
-"use strict";
-var SAMPLE_DRILLS = [{"trigger": "CodePipelineのパイプライン失敗をSlack #devopsへ通知（全パイプライン）", "answer": "EventBridgeでCodePipeline Pipeline Execution FAILEDを拾う→ターゲットはLambda→Slack Incoming WebhookへPOST （Stage/Action粒度は通知過多）"}, {"trigger": "Lambdaデプロイ短縮＋エラー検出・ロールバック自動化", "answer": "SAM＋CodeDeployトラフィックシフト＋pre/postフック＋CWアラームで自動ロールバック （手動オリジン切替・変更セット案は✕。pre/postフックはCodeDeploy用語）"}, {"trigger": "デプロイ中に自動テスト＋失敗で即・前バージョンへ自動ロールバック（CodeDeploy×EC2）", "answer": "デプロイグループで自動ロールバック有効化＋appspecのValidateServiceフックでテスト （失敗＝デプロイ失敗→組み込みで巻き戻し。ValidateService＝EC2用に実在、Lambda用はBefore/AfterAllowTrafficのみ）。stop-deployment＋再デプロイ・アラーム→Lambda再デプロイ＝手作り配管✕、OneAtATime＋手動承認＝人力✕"}, {"trigger": "ECS×CodeDeployで一部トラフィックだけ新バージョン検証＋応答時間悪化で迅速に自動ロールバック", "answer": "CodeDeployDefault.ECSCanary10Percent5Minutes＋応答時間のCWアラームをデプロイグループに関連付け＋自動ロールバック有効化 。AllAtOnce＋Lambdaロールバック＝手作り✕、Linear＋BeforeAllowTrafficでテスト＝トラフィック前は応答時間測れん✕、ALB手動＋Step Functions＝手組み✕"}, {"trigger": "Configドリフトルール＝NON\\_COMPLIANTやのにコンソール＝IN\\_SYNC", "answer": "スロットリングの誤検出＝無視してよい （ルールはDetectStackDrift頼み）。 カスタムリソースのドリフト検出は非サポート"}, {"trigger": "Control Tower＋Terraformのナレッジでアカウント発行〜OU配置〜ベースラインを自動完結", "answer": "AFT（Account Factory for Terraform）一択 ＝専用TerraformリポジトリにアカウントリクエストをPush→マネージドパイプラインが全自動。CFN派＝CfCT／Terraform派＝AFT。Organizations API自前パイプライン＝統制迂回、「手動アップロード」カスタムオーケストレーター＝✕"}, {"trigger": "組織全アカウントに監査IAMロール＋Configルールをデプロイ＋新規アカウントも自動", "answer": "管理or委任管理者アカウントでサービスマネージド型StackSet＋自動デプロイ有効化＋組織ルートをターゲット 。SCPで作成を強制＝SCPはリソースを作れん✕、EventBridge＋Lambda＋AssumeRole＝自前配管✕、セルフマネージド＋新規のたびSSMランブック＝手作業残存✕"}, {"trigger": "ECS + ASG（LaunchConfiguration）をCFNで構築→EC2が誤ったECSクラスターにリンク", "answer": "LaunchConfigurationのUserDataに echo ECS_CLUSTER=XXX >> /etc/ecs/ecs.config （ECSエージェントは起動時に/etc/ecs/ecs.configを読む——書いてなければdefaultに登録。 AWS::EC2::Instance のUserDataはASG配下では効かない。ECS::Cluster/Serviceリソース定義では登録制御不可）"}, {"trigger": "サービスロール？SLR？IRSA？", "answer": "全部ただのIAMロール 。信頼ポリシーに誰を書いたかの呼び分け"}, {"trigger": "ログが改ざんされていない・正確なイベント順序を100%証明", "answer": "CloudTrailログファイル整合性検証（ダイジェスト＋ハッシュ）。Vault Lockは未来の保護で証明はできん・Configは設定変更や"}, {"trigger": "DB接続の静的パスワード廃止＋認証情報の発行元VPCとコール元VPC不一致なら拒否（3つ選択）", "answer": "IAM DB認証有効化＋AWSAuthenticationPluginユーザー／SDKで署名付き認証トークン生成／rds-db:connect＋StringNotEqualsで aws:SourceVpc≠\\$\\{aws:EC2InstanceSourceVPC\\} を明示Deny 。Secrets Manager＋ローテーション＝回す≠廃止✕、aws:SourceIp＝パブリックIP基準✕、STSのVPCエンドポイント＝経路だけで判定せん✕"}, {"trigger": "ログにXが出たら 通知", "answer": "メトリクスフィルター＋アラーム→SNS （MF＝ログ→メトリクス変換器）"}, {"trigger": "CloudWatchメトリクスを15ヶ月超（7年等）保持・可視化／最小の開発工数", "answer": "CloudWatchメトリクスストリーム→Data Firehose→S3＋QuickSightで可視化＋Athenaで期間取得 。CWメトリクスの保持は 最長15ヶ月固定 ——「Extended Retention」＝実在せん機能✕、15分ポーリングLambda＝手作り配管✕、CWダッシュボードはS3のデータを描けん✕"}, {"trigger": "RDSのクエリ数が通常のベースラインより急増したら検知＋待機イベントなどDBエンジンレベルで根本原因特定（2つ選択）", "answer": "DevOps Guru for RDS（MLでベースライン学習→異常パターン検知）＋Performance Insights（待機イベント・SQLごとにDB負荷をスライス） 。静的しきい値アラーム＝ベースライン検知にならん✕、拡張モニタリング＝OSレベルで待機イベント見えん✕、スロークエリログ＋Lambda解析＝手作り✕"}, {"trigger": "DR計画：「RTO数時間＋RPO分単位＋コスト効率」", "answer": "パイロットライト：RDSクロスリージョンリードレプリカ（常時複製）＋Route 53フェイルオーバー＋昇格 （DR4段階：バックアップ＜種火＜ウォーム（RTO分単位）＜A/A（ほぼゼロ）。障害時バックアップ適用＝RPO保証できんで✕）"}, {"trigger": "S3クロスリージョンレプリケーション（CRR）の新規構成手順（3つ選択）", "answer": "3点セット＝ ①両バケットでバージョニング②ソース側にルール（ターゲット＋範囲）③S3サービスプリンシパルを信頼するIAMロール 。「受信承認ルール」＝実在せん✕（被弾）、バケットポリシー＝クロスアカウントのときだけ✕（被弾）、Transfer Acceleration＝アップロード加速で別物✕"}, {"trigger": "S3の既存データ＋新規データの両方を別リージョンへレプリケート（DR）＋運用オーバーヘッド最小（2つ選択）", "answer": "CRRルール（新規のみ・要バージョニング）＋S3バッチレプリケーションジョブ（既存を一括） 。EventBridge＋Lambdaコピー＝純正があるのに手作り✕、DataSyncエージェント＝S3間は不要＋CRRに運用負け✕、ライフサイクル＝クラス移行の道具で別バケット複製はできん✕"}, {"trigger": "Glueジョブのリトライ失敗（＝最終失敗）でSNS通知", "answer": "EventBridge→Lambda（試行回数・イベント内容を判定）→SNS 。EventBridgeを直接SNSに繋ぐとリトライ中の失敗にも毎回通知が飛んでしまう。Personal Health Dashboard＝役割違いで✕、SQS DLQ＝要件とズレで✕"}, {"trigger": "多段ワークフロー（毎日のバックアップ等）＋条件分岐の失敗処理＋実行履歴の監査＋メール通知", "answer": "Step Functions＋各ステップをLambda＋Catch/Retryで条件分岐→SNS通知 （実行履歴が標準で記録＝監査可能。単一Lambda＋Config＝Configはリソース構成の記録で実行履歴やない、EC2＋cron＝手作り・単一障害点）"}, {"trigger": "AWS認証情報が公開GitHubに漏洩→アラート＋API呼び出しレポート＋無効化／ すべての実行が監査可能", "answer": "AWS HealthのAWS\\_RISK\\_CREDENTIALS\\_EXPOSEDイベントをEventBridgeで監視→Step Functionsワークフロー起動→IAM（無効化）・CloudTrail（レポート）・SNS（アラート）のAPI実行 。ソース＝Health（CloudTrailはレポート用の部品で発信元やない✕）、「監査可能な実行」＝Step Functions（Lambda単発＝実行履歴の監査に負ける✕）"}];
+<script>"use strict";
+var SAMPLE_DRILLS = [{"trigger": "CodePipelineのパイプライン失敗をSlack #devopsへ通知（全パイプライン）", "answer": "EventBridgeでCodePipeline Pipeline Execution FAILEDを拾う→ターゲットはLambda→Slack Incoming WebhookへPOST （Stage/Action粒度は通知過多）", "short": "EventBridgeで失敗を拾い、LambdaからSlackへ通知"}, {"trigger": "Lambdaデプロイ短縮＋エラー検出・ロールバック自動化", "answer": "SAM＋CodeDeployトラフィックシフト＋pre/postフック＋CWアラームで自動ロールバック （手動オリジン切替・変更セット案は✕。pre/postフックはCodeDeploy用語）", "short": "SAMとCodeDeployのトラフィックシフト、CWアラームで自動ロールバック"}, {"trigger": "デプロイ中に自動テスト＋失敗で即・前バージョンへ自動ロールバック（CodeDeploy×EC2）", "answer": "デプロイグループで自動ロールバック有効化＋appspecのValidateServiceフックでテスト （失敗＝デプロイ失敗→組み込みで巻き戻し。ValidateService＝EC2用に実在、Lambda用はBefore/AfterAllowTrafficのみ）。stop-deployment＋再デプロイ・アラーム→Lambda再デプロイ＝手作り配管✕、OneAtATime＋手動承認＝人力✕", "short": "自動ロールバック有効化とValidateServiceフックでテスト"}, {"trigger": "ECS×CodeDeployで一部トラフィックだけ新バージョン検証＋応答時間悪化で迅速に自動ロールバック", "answer": "CodeDeployDefault.ECSCanary10Percent5Minutes＋応答時間のCWアラームをデプロイグループに関連付け＋自動ロールバック有効化 。AllAtOnce＋Lambdaロールバック＝手作り✕、Linear＋BeforeAllowTrafficでテスト＝トラフィック前は応答時間測れん✕、ALB手動＋Step Functions＝手組み✕", "short": "ECSCanary10Percent5Minutesと応答時間アラーム、自動ロールバック"}, {"trigger": "Configドリフトルール＝NON\\_COMPLIANTやのにコンソール＝IN\\_SYNC", "answer": "スロットリングの誤検出＝無視してよい （ルールはDetectStackDrift頼み）。 カスタムリソースのドリフト検出は非サポート", "short": "誤検出なので無視してよい"}, {"trigger": "Control Tower＋Terraformのナレッジでアカウント発行〜OU配置〜ベースラインを自動完結", "answer": "AFT（Account Factory for Terraform）一択 ＝専用TerraformリポジトリにアカウントリクエストをPush→マネージドパイプラインが全自動。CFN派＝CfCT／Terraform派＝AFT。Organizations API自前パイプライン＝統制迂回、「手動アップロード」カスタムオーケストレーター＝✕", "short": "AFT、Account Factory for Terraform"}, {"trigger": "組織全アカウントに監査IAMロール＋Configルールをデプロイ＋新規アカウントも自動", "answer": "管理or委任管理者アカウントでサービスマネージド型StackSet＋自動デプロイ有効化＋組織ルートをターゲット 。SCPで作成を強制＝SCPはリソースを作れん✕、EventBridge＋Lambda＋AssumeRole＝自前配管✕、セルフマネージド＋新規のたびSSMランブック＝手作業残存✕", "short": "サービスマネージドStackSetと自動デプロイ、組織ルートを対象"}, {"trigger": "ECS + ASG（LaunchConfiguration）をCFNで構築→EC2が誤ったECSクラスターにリンク", "answer": "LaunchConfigurationのUserDataに echo ECS_CLUSTER=XXX >> /etc/ecs/ecs.config （ECSエージェントは起動時に/etc/ecs/ecs.configを読む——書いてなければdefaultに登録。 AWS::EC2::Instance のUserDataはASG配下では効かない。ECS::Cluster/Serviceリソース定義では登録制御不可）", "short": "UserDataでecs.configにECS_CLUSTERを書く"}, {"trigger": "サービスロール？SLR？IRSA？", "answer": "全部ただのIAMロール 。信頼ポリシーに誰を書いたかの呼び分け", "short": "全部ただのIAMロール、信頼ポリシーの書き分け"}, {"trigger": "ログが改ざんされていない・正確なイベント順序を100%証明", "answer": "CloudTrailログファイル整合性検証（ダイジェスト＋ハッシュ）。Vault Lockは未来の保護で証明はできん・Configは設定変更や", "short": "CloudTrailのログファイル整合性検証"}, {"trigger": "DB接続の静的パスワード廃止＋認証情報の発行元VPCとコール元VPC不一致なら拒否（3つ選択）", "answer": "IAM DB認証有効化＋AWSAuthenticationPluginユーザー／SDKで署名付き認証トークン生成／rds-db:connect＋StringNotEqualsで aws:SourceVpc≠\\$\\{aws:EC2InstanceSourceVPC\\} を明示Deny 。Secrets Manager＋ローテーション＝回す≠廃止✕、aws:SourceIp＝パブリックIP基準✕、STSのVPCエンドポイント＝経路だけで判定せん✕", "short": "IAM DB認証と署名付きトークン、SourceVpc以外をDeny"}, {"trigger": "ログにXが出たら 通知", "answer": "メトリクスフィルター＋アラーム→SNS （MF＝ログ→メトリクス変換器）", "short": "メトリクスフィルターとアラームでSNSへ"}, {"trigger": "CloudWatchメトリクスを15ヶ月超（7年等）保持・可視化／最小の開発工数", "answer": "CloudWatchメトリクスストリーム→Data Firehose→S3＋QuickSightで可視化＋Athenaで期間取得 。CWメトリクスの保持は 最長15ヶ月固定 ——「Extended Retention」＝実在せん機能✕、15分ポーリングLambda＝手作り配管✕、CWダッシュボードはS3のデータを描けん✕", "short": "メトリクスストリームからFirehose、S3、QuickSight"}, {"trigger": "RDSのクエリ数が通常のベースラインより急増したら検知＋待機イベントなどDBエンジンレベルで根本原因特定（2つ選択）", "answer": "DevOps Guru for RDS（MLでベースライン学習→異常パターン検知）＋Performance Insights（待機イベント・SQLごとにDB負荷をスライス） 。静的しきい値アラーム＝ベースライン検知にならん✕、拡張モニタリング＝OSレベルで待機イベント見えん✕、スロークエリログ＋Lambda解析＝手作り✕", "short": "DevOps Guru for RDSとPerformance Insights"}, {"trigger": "DR計画：「RTO数時間＋RPO分単位＋コスト効率」", "answer": "パイロットライト：RDSクロスリージョンリードレプリカ（常時複製）＋Route 53フェイルオーバー＋昇格 （DR4段階：バックアップ＜種火＜ウォーム（RTO分単位）＜A/A（ほぼゼロ）。障害時バックアップ適用＝RPO保証できんで✕）", "short": "パイロットライト、リードレプリカ常時複製とフェイルオーバー"}, {"trigger": "S3クロスリージョンレプリケーション（CRR）の新規構成手順（3つ選択）", "answer": "3点セット＝ ①両バケットでバージョニング②ソース側にルール（ターゲット＋範囲）③S3サービスプリンシパルを信頼するIAMロール 。「受信承認ルール」＝実在せん✕（被弾）、バケットポリシー＝クロスアカウントのときだけ✕（被弾）、Transfer Acceleration＝アップロード加速で別物✕", "short": "両バケットでバージョニング、ルールとIAMロール"}, {"trigger": "S3の既存データ＋新規データの両方を別リージョンへレプリケート（DR）＋運用オーバーヘッド最小（2つ選択）", "answer": "CRRルール（新規のみ・要バージョニング）＋S3バッチレプリケーションジョブ（既存を一括） 。EventBridge＋Lambdaコピー＝純正があるのに手作り✕、DataSyncエージェント＝S3間は不要＋CRRに運用負け✕、ライフサイクル＝クラス移行の道具で別バケット複製はできん✕", "short": "CRRルールとバッチレプリケーションジョブ"}, {"trigger": "Glueジョブのリトライ失敗（＝最終失敗）でSNS通知", "answer": "EventBridge→Lambda（試行回数・イベント内容を判定）→SNS 。EventBridgeを直接SNSに繋ぐとリトライ中の失敗にも毎回通知が飛んでしまう。Personal Health Dashboard＝役割違いで✕、SQS DLQ＝要件とズレで✕", "short": "EventBridgeからLambdaで判定してSNSへ"}, {"trigger": "多段ワークフロー（毎日のバックアップ等）＋条件分岐の失敗処理＋実行履歴の監査＋メール通知", "answer": "Step Functions＋各ステップをLambda＋Catch/Retryで条件分岐→SNS通知 （実行履歴が標準で記録＝監査可能。単一Lambda＋Config＝Configはリソース構成の記録で実行履歴やない、EC2＋cron＝手作り・単一障害点）", "short": "Step FunctionsとCatch/Retryで条件分岐、SNS通知"}, {"trigger": "AWS認証情報が公開GitHubに漏洩→アラート＋API呼び出しレポート＋無効化／ すべての実行が監査可能", "answer": "AWS HealthのAWS\\_RISK\\_CREDENTIALS\\_EXPOSEDイベントをEventBridgeで監視→Step Functionsワークフロー起動→IAM（無効化）・CloudTrail（レポート）・SNS（アラート）のAPI実行 。ソース＝Health（CloudTrailはレポート用の部品で発信元やない✕）、「監査可能な実行」＝Step Functions（Lambda単発＝実行履歴の監査に負ける✕）", "short": "HealthイベントでStep Functions、IAM無効化とSNSアラート"}];
 
 // ---------- drill set: imported drills (localStorage) or sample ----------
 var DRILLS_STORE = "amivoice-drill-custom-v1";
@@ -2117,7 +2143,7 @@ try {
 var raw = localStorage.getItem(DRILLS_STORE);
 if (raw) {
 var arr = JSON.parse(raw);
-if (Array.isArray(arr) && arr.length && arr.every(function (d) { return d && typeof d.trigger === "string" && typeof d.answer === "string";})) return arr;
+if (Array.isArray(arr) && arr.length && arr.every(function (d) { return d && typeof d.trigger === "string" && typeof d.answer === "string" && (d.short === undefined || typeof d.short === "string");})) return arr;
 }
 } catch (e) {}
 return SAMPLE_DRILLS;
@@ -2160,6 +2186,8 @@ var ALIAS = {
 "ケーエムエス": "kms", "エーゼット": "az", "オーユー": "ou", "シーアールアール": "crr",
 "クラウドフォーメーション": "cloudformation", "シーエフエヌ": "cfn",
 "クラウドトレイル": "cloudtrail", "クラウドウォッチ": "cloudwatch",
+"クラウドフロント": "cloudfront", "エッジ": "edge", "アテナ": "athena",
+"スタンバイ": "standby", "グローバル": "global", "テーブル": "tables",
 "コードパイプライン": "codepipeline", "コードデプロイ": "codedeploy", "コードビルド": "codebuild",
 "コードアーティファクト": "codeartifact", "ダイナモディービー": "dynamodb",
 "ファイアホース": "firehose", "コンフィグ": "config", "オートメーション": "automation",
@@ -2188,18 +2216,59 @@ var setB = {}; gb.forEach(function (x) { setB[x] = true;});
 var hit = ga.filter(function (x) { return setB[x];}).length;
 return 2 * hit / (ga.length + gb.length);
 }
-function judge(heard, answer) {
-var hRaw = normalize(heard), hAli = normalize(applyAlias(heard || "")), a = normalize(answer);
-if (!hRaw && !hAli) return false;
-if (a.indexOf(hRaw) >= 0 || hRaw.indexOf(a) >= 0) return true;
-if (a.indexOf(hAli) >= 0 || hAli.indexOf(a) >= 0) return true;
-var terms = keyTerms(answer);
-if (terms.length) {
-var hit = terms.filter(function (tm) { return hRaw.indexOf(tm) >= 0 || hAli.indexOf(tm) >= 0; }).length;
-var cov = hit / terms.length;
-if (cov >= 0.5 || hit >= 3 || (hit >= 2 && cov >= 0.3)) return true;
+// short が無いドリル（取り込みJSON等）向けに、即答から要点をその場で抽出する
+function extractShort(answer) {
+if (!answer) return "";
+var a = answer.replace(/\\_/g, "_").replace(/\[([^\]]*)\]\([^)]*\)/g, "$1");
+var xi = a.indexOf("✕");
+if (xi > 20) a = a.slice(0, xi);
+var core = a.split("。")[0];
+if (core.replace(/\s/g, "").length < 8) core = a.replace(/。$/, "");
+core = core.replace(/[（(][^（）()]*[）)]/g, "");
+core = core.replace(/\s+/g, "");
+if (core.length <= 30 && core.indexOf("✕") < 0) return core.replace(/や$/, "");
+var segs = core.split(/[→＋+\/／]/).filter(function (x) { return x.trim().length;});
+var picked = [];
+for (var i = 0; i < segs.length && picked.length < 3; i++) {
+var seg = segs[i].trim();
+var m = seg.match(/^[^＝=]{1,10}＝(.+)$/);
+if (m) seg = m[1];
+if (seg.length > 20) seg = seg.slice(0, 20);
+picked.push(seg);
 }
-return dice(hAli, a) >= 0.45;
+var joined = picked.join("、");
+if (joined.length >= 4) return joined;
+var terms = keyTerms(core);
+return terms.slice(0, 6).join("・") || core.slice(0, 30);
+}
+function shortOf(d) {
+return (d && typeof d.short === "string" && d.short.trim())? d.short: extractShort(d.answer);
+}
+// 判定用の要点キーワード（複合語は分母を膨らませるので数えない）
+function shortTerms(text) {
+var conv = text.replace(/[Ａ-Ｚａ-ｚ０-９]/g, function (c) { return String.fromCharCode(c.charCodeAt(0) - 0xFEE0);});
+var terms = {};
+var m, re1 = /[A-Za-z][A-Za-z0-9]{1,}/g, re2 = /[ァ-ヶー]{3,}/g;
+while ((m = re1.exec(conv))!== null) terms[normalize(m[0])] = true;
+while ((m = re2.exec(conv))!== null) terms[normalize(m[0])] = true;
+return Object.keys(terms).filter(function (t) { return t.length >= 2;});
+}
+// 判定は short（声で言える要点）のキーワードで行う。即答の全文は判定に使わない
+// verdict: "correct"（正解） / "partial"（部分的に正解） / "wrong"（不正解）
+function judgeShort(heard, shortText) {
+var hRaw = normalize(heard), hAli = normalize(applyAlias(heard || ""));
+var a = normalize(shortText);
+var terms = shortTerms(shortText);
+var total = terms.length;
+var hit = terms.filter(function (tm) { return hRaw.indexOf(tm) >= 0 || hAli.indexOf(tm) >= 0; }).length;
+if (!hRaw && !hAli) return { verdict: "wrong", hit: 0, total: total };
+var contained = !!a && ((hRaw.length >= 4 && a.indexOf(hRaw) >= 0) || (hAli.length >= 4 && a.indexOf(hAli) >= 0) || (a.length >= 3 && hRaw.indexOf(a) >= 0) || (a.length >= 3 && hAli.indexOf(a) >= 0));
+var cov = total? hit / total: 0;
+var d = dice(hAli, a);
+var verdict = "wrong";
+if (contained || cov >= 0.5 || hit >= 3 || (hit >= 2 && cov >= 0.34) || d >= 0.55) verdict = "correct";
+else if ((hit >= 1 && cov >= 0.2) || hit >= 2 || d >= 0.3) verdict = "partial";
+return { verdict: verdict, hit: hit, total: total };
 }
 
 // ---------- speech ----------
@@ -2224,12 +2293,23 @@ var running = false;
 var queue = [], qpos = 0;
 var sessionAnswered = 0, sessionCorrect = 0;
 var listening = false, heardResolve = null, listenTimer = null;
+var cur = null; // { idx, d, shortText, pending }
 
 var el = function (id) { return document.getElementById(id);};
-function setStatus(t) { el("status").textContent = t;}
+function setState(cls, text, sub) {
+var s = el("stateLabel");
+s.className = cls || "";
+s.textContent = text;
+el("stateSub").textContent = sub || "";
+}
+function setStatus(t) { setState("", t, ""); }
 function updateScore() {
 el("progress").textContent = sessionAnswered + " 問回答（全 " + DRILLS.length + " 問中）";
 el("rate").textContent = sessionAnswered? Math.round(sessionCorrect / sessionAnswered * 100) + "% (" + sessionCorrect + "/" + sessionAnswered + ")": "-";
+}
+function showRetryNext(show) {
+el("retryBtn").style.display = show? "": "none";
+el("nextBtn").style.display = show? "": "none";
 }
 
 function buildQueue() {
@@ -2254,13 +2334,13 @@ Wrp.authorization = appkey;
 Wrp.TRACE = function (msg) { console.log("[Wrp]", msg);};
 Wrp.connectEnded = function () {
 if (!running) return;
-setStatus("接続しました");
+setState("", "接続しました", "");
 nextQuestion();
 };
 Wrp.disconnectEnded = function (reason) {
 if (running) {
-setStatus("切断されました" + (reason? ": " + reason: "") + "（APPKEYや通信を確認してください）");
-stopAll(false);
+setState("st-ng", "切断されました", (reason? reason + "。": "") + "APPKEYや通信を確認してください");
+stopAll(false, true);
 }
 };
 Wrp.resultFinalized = function (resultStr) {
@@ -2281,7 +2361,6 @@ function startListening() {
 return new Promise(function (resolve) {
 listening = true;
 heardResolve = resolve;
-el("heard").textContent = "🎤 聞き取り中…声で答えてください";
 Wrp.feedDataResume();
 listenTimer = setTimeout(function () { finishListening("");}, 30000);
 });
@@ -2295,45 +2374,79 @@ var r = heardResolve; heardResolve = null;
 if (r) r(text);
 }
 
+function commitRecord() {
+if (!cur || !cur.pending || cur.recorded) return;
+cur.recorded = true;
+var stats = loadStats();
+var s = stats[cur.idx] || { s: 0, w: 0};
+s.s++;
+if (cur.pending.verdict !== "correct") s.w++;
+stats[cur.idx] = s; saveStats(stats);
+sessionAnswered++;
+if (cur.pending.verdict === "correct") sessionCorrect++;
+updateScore();
+}
+
 async function nextQuestion() {
 if (!running) return;
 if (qpos >= queue.length) {
-setStatus("一周しました。お疲れさまでした");
+setState("", "一周しました", "お疲れさまでした");
 await speak("一周しました。お疲れさまでした");
-stopAll(true);
+if (running) stopAll(true);
 return;
 }
 var idx = queue[qpos++];
 var d = DRILLS[idx];
+cur = { idx: idx, d: d, shortText: shortOf(d), pending: null, recorded: false };
 el("triggerText").textContent = d.trigger;
-el("judge").textContent = "";
-setStatus("問題を読み上げます");
+el("heardText").textContent = "（まだ回答していません）";
+el("resultBox").style.display = "none";
+showRetryNext(false);
+setState("st-question", "問題", "問題を読み上げます");
 await speak(d.trigger);
 if (!running) return;
-setStatus("どうぞ");
+await listenAndJudge();
+}
+
+async function listenAndJudge() {
+if (!cur || !running) return;
+el("resultBox").style.display = "none";
+showRetryNext(false);
+setState("st-listen", "どうぞ、答えてください", "聞き取り中…声で答えてください");
 await speak("どうぞ");
 if (!running) return;
 var heard = await startListening();
 if (!running) return;
-el("heard").textContent = heard? ("あなたの回答: " + heard): "（回答が聞き取れませんでした）";
-var ok = judge(heard, d.answer);
-var stats = loadStats();
-var s = stats[idx] || { s: 0, w: 0};
-s.s++; if (!ok) s.w++;
-stats[idx] = s; saveStats(stats);
-sessionAnswered++; if (ok) sessionCorrect++;
-updateScore();
-el("judge").textContent = ok? "⭕ 正解": "❌ 不正解";
-el("judge").style.color = ok? "#1a8f3c": "#c62828";
-if (ok) { await speak("正解");}
-else { await speak("不正解。正解は。" + d.answer);}
+setState("st-judge", "判定中", "");
+el("heardText").textContent = heard? heard: "（回答が聞き取れませんでした）";
+var res = judgeShort(heard, cur.shortText);
+cur.pending = res;
+el("shortText").textContent = cur.shortText;
+el("explainText").textContent = cur.d.answer;
+el("judgeDetail").textContent = "要点の一致: " + res.hit + " / " + res.total + (res.verdict === "partial"? "（部分的に正解は、成績では不正解として記録され、再出題の対象になります）": "");
+el("resultBox").style.display = "";
+if (res.verdict === "correct") {
+setState("st-ok", "⭕ 正解", "");
+await speak("正解");
+} else if (res.verdict === "partial") {
+setState("st-partial", "△ 部分的に正解", "正解の要点を読み上げます");
+await speak("部分的に正解。要点は。" + cur.shortText);
+} else {
+setState("st-ng", "❌ 不正解", "正解の要点を読み上げます");
+await speak("不正解。正解は。" + cur.shortText);
+}
 if (!running) return;
-nextQuestion();
+setState(cur.pending.verdict === "correct"? "st-ok": (cur.pending.verdict === "partial"? "st-partial": "st-ng"),
+cur.pending.verdict === "correct"? "⭕ 正解": (cur.pending.verdict === "partial"? "△ 部分的に正解": "❌ 不正解"),
+"「もう一回」で同じ問題を言い直せます。「次へ」で進みます");
+showRetryNext(true);
 }
 
-function stopAll(finished) {
+function stopAll(finished, keepState) {
+commitRecord();
 running = false;
 listening = false;
+cur = null;
 clearTimeout(listenTimer);
 try { speechSynthesis.cancel();} catch (e) {}
 try { Wrp.feedDataPause();} catch (e) {}
@@ -2341,20 +2454,22 @@ try { Wrp.disconnect();} catch (e) {}
 el("startBtn").disabled = false;
 el("stopBtn").disabled = true;
 el("skipBtn").disabled = true;
-if (!finished) setStatus("停止しました");
+showRetryNext(false);
+if (!finished && !keepState) setState("", "停止しました", "");
 }
 
 el("startBtn").onclick = function () {
 var appkey = localStorage.getItem(KEY_STORE) || "";
-if (!appkey) { setStatus("先に設定から APPKEY を保存してください"); document.querySelector("details").open = true; return;}
+if (!appkey) { setState("st-ng", "APPKEYが未保存です", "先に設定から APPKEY を保存してください"); document.querySelector("details").open = true; return;}
 running = true;
 queue = buildQueue(); qpos = 0;
 sessionAnswered = 0; sessionCorrect = 0;
+cur = null;
 updateScore();
 el("startBtn").disabled = true;
 el("stopBtn").disabled = false;
 el("skipBtn").disabled = false;
-setStatus("接続中…");
+setState("", "接続中…", "");
 setupWrp(appkey);
 Wrp.connect();
 };
@@ -2362,6 +2477,18 @@ el("stopBtn").onclick = function () { stopAll(false);};
 el("skipBtn").onclick = function () {
 if (!running) return;
 if (listening) { finishListening("");}
+};
+el("retryBtn").onclick = function () {
+if (!running || !cur || !cur.pending) return;
+cur.pending = null;
+listenAndJudge();
+};
+el("nextBtn").onclick = function () {
+if (!running || !cur) return;
+commitRecord();
+cur = null;
+showRetryNext(false);
+nextQuestion();
 };
 
 // ---------- settings ----------
@@ -2377,8 +2504,9 @@ refreshKeyState();
 };
 el("resetStatsBtn").onclick = function () {
 localStorage.removeItem(STATS_STORE);
-setStatus("成績をリセットしました");
+setState("", "成績をリセットしました", "");
 };
+
 // ---------- drill import ----------
 function refreshDrillState() {
 var custom =!!localStorage.getItem(DRILLS_STORE);
@@ -2392,7 +2520,7 @@ reader.onload = function () {
 try {
 var arr = JSON.parse(reader.result);
 if (!Array.isArray(arr) ||!arr.length) throw new Error("empty");
-arr.forEach(function (d) { if (!d || typeof d.trigger!== "string" || typeof d.answer!== "string") throw new Error("bad format");});
+arr.forEach(function (d) { if (!d || typeof d.trigger!== "string" || typeof d.answer!== "string" || (d.short !== undefined && typeof d.short!== "string")) throw new Error("bad format");});
 localStorage.setItem(DRILLS_STORE, JSON.stringify(arr));
 DRILLS = arr;
 localStorage.removeItem(STATS_STORE);
@@ -2417,6 +2545,7 @@ refreshDrillState();
 setStatus("サンプルドリルに戻しました。成績はリセットされました");
 };
 refreshDrillState();
+
 refreshKeyState();
 updateScore();
 </script>
