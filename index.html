@@ -72,6 +72,8 @@ details { margin-top: 20px;}
 <button id="saveKeyBtn">保存</button>
 <span id="keyState" class="small"></span>
 <p class="small"><button id="resetStatsBtn">成績リセット</button></p>
+<p class="small"><button id="exportResultsBtn">結果を書き出す（JSON）</button> <button id="copyResultsBtn">結果をコピー</button> <span id="exportState"></span></p>
+<p class="small">結果を Muse に渡すと、苦手な項目の分析と専用ドリルを作ってもらえます（書き出しに APPKEY は含まれません）。</p>
 <hr>
 <p class="small">ドリルの取り込み: <code>{trigger, answer, short?}</code> の配列 JSON ファイルを選ぶと、その内容をこの端末の localStorage に保存して出題対象を切り替えます（再読み込みしても残ります）。<code>short</code>（声で言える要点）は任意です。無い項目は即答から自動で要点を抽出して判定します。取り込むと成績はリセットされます。</p>
 <input type="file" id="drillFileInput" accept=".json,application/json">
@@ -2381,6 +2383,8 @@ var stats = loadStats();
 var s = stats[cur.idx] || { s: 0, w: 0};
 s.s++;
 if (cur.pending.verdict !== "correct") s.w++;
+if (cur.pending.verdict === "partial") s.p = (s.p || 0) + 1;
+s.last = cur.pending.verdict;
 stats[cur.idx] = s; saveStats(stats);
 sessionAnswered++;
 if (cur.pending.verdict === "correct") sessionCorrect++;
@@ -2505,6 +2509,104 @@ refreshKeyState();
 el("resetStatsBtn").onclick = function () {
 localStorage.removeItem(STATS_STORE);
 setState("", "成績をリセットしました", "");
+};
+
+// ---------- results export (Muse 連携) ----------
+// 成績 { s: 試行, w: 非正解, p: 部分点, last: 最終結果 } から書き出しデータを作る。APPKEY は含めない
+function buildResults() {
+var stats = loadStats();
+var items = [];
+var tot = 0, cor = 0, par = 0, wr = 0;
+Object.keys(stats).forEach(function (k) {
+var idx = Number(k);
+var d = DRILLS[idx];
+var s = stats[k];
+if (!d || !s || !s.s) return;
+var p = s.p || 0;
+var correct = s.s - (s.w || 0);
+var wrong = (s.w || 0) - p;
+items.push({
+index: idx,
+trigger: d.trigger,
+short: shortOf(d),
+attempts: s.s,
+correct: correct,
+partial: p,
+wrong: wrong,
+lastResult: s.last || null
+});
+tot += s.s; cor += correct; par += p; wr += wrong;
+});
+items.sort(function (a, b) { return a.index - b.index;});
+return {
+exportedAt: new Date().toISOString(),
+app: "amivoice-drill",
+version: 1,
+summary: {
+totalAttempts: tot,
+correct: cor,
+partial: par,
+wrong: wr,
+accuracy: tot? Math.round(cor / tot * 1000) / 1000: 0
+},
+items: items
+};
+}
+function verdictJa(v) {
+if (v === "correct") return "正解";
+if (v === "partial") return "部分的に正解";
+if (v === "wrong") return "不正解";
+return "—";
+}
+function buildResultsText() {
+var r = buildResults();
+var s = r.summary;
+var lines = [];
+lines.push("【反射ドリル音声版の結果】");
+lines.push("総回答数 " + s.totalAttempts + "（正解 " + s.correct + " / 部分的に正解 " + s.partial + " / 不正解 " + s.wrong + "） 正答率 " + (s.totalAttempts? Math.round(s.correct / s.totalAttempts * 100): 0) + "%");
+var bad = r.items.filter(function (it) { return it.partial + it.wrong > 0;});
+bad.sort(function (a, b) { return (b.partial + b.wrong) - (a.partial + a.wrong);});
+if (bad.length) {
+lines.push("■ 間違えた項目");
+bad.forEach(function (it) {
+lines.push("- " + it.trigger + "｜要点: " + it.short + "（試行 " + it.attempts + "・正解 " + it.correct + "・部分点 " + it.partial + "・不正解 " + it.wrong + "・最終結果: " + verdictJa(it.lastResult) + "）");
+});
+} else {
+lines.push("■ 間違えた項目はありません");
+}
+lines.push("この結果をもとに、苦手な項目の専用ドリル（{trigger, answer, short} の JSON）を作ってください。");
+return lines.join("\n");
+}
+el("exportResultsBtn").onclick = function () {
+var r = buildResults();
+if (!r.summary.totalAttempts) { el("exportState").textContent = "まだ成績がありません"; return;}
+var blob = new Blob([JSON.stringify(r, null, 2)], { type: "application/json" });
+var url = URL.createObjectURL(blob);
+var a = document.createElement("a");
+a.href = url;
+a.download = "drill-results.json";
+document.body.appendChild(a);
+a.click();
+document.body.removeChild(a);
+setTimeout(function () { URL.revokeObjectURL(url);}, 4000);
+el("exportState").textContent = "書き出しました（drill-results.json）";
+};
+el("copyResultsBtn").onclick = function () {
+if (!buildResults().summary.totalAttempts) { el("exportState").textContent = "まだ成績がありません"; return;}
+var text = buildResultsText();
+var done = function () { el("exportState").textContent = "コピーしました。チャットに貼って Muse に渡してください";};
+var fallback = function () {
+var ta = document.createElement("textarea");
+ta.value = text;
+ta.style.position = "fixed";
+ta.style.opacity = "0";
+document.body.appendChild(ta);
+ta.select();
+try { document.execCommand("copy"); done();} catch (e) { el("exportState").textContent = "コピーに失敗しました"; }
+document.body.removeChild(ta);
+};
+if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done, fallback);
+else fallback();
 };
 
 // ---------- drill import ----------
