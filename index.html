@@ -5,8 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#EDF0F3" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#10182A" media="(prefers-color-scheme: dark)">
-<title>あいづちラジオ</title>
-<meta name="description" content="聞き流しで終わらせない資格勉強ラジオ。解説を耳で聞いて、「なるほど」「わからん」と声で返すだけで進みます。">
+<title>おしえてラジオ</title>
+<meta name="description" content="聞いて、後輩に説明して、覚える。資格勉強を耳と声で回すラジオです。">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Zen+Maru+Gothic:wght@500;700;900&display=swap" rel="stylesheet">
@@ -16,150 +16,110 @@
 <body>
 <div class="app">
 
-  <header class="top">
-    <h1 class="brand">あいづちラジオ</h1>
-    <nav class="top-nav" aria-label="メニュー">
-      <button type="button" class="link-btn" id="openList">一覧</button>
-      <button type="button" class="link-btn" id="openMemo">ぼやき<span class="count" id="memoCount" hidden></span></button>
-      <button type="button" class="link-btn" id="openSettings">設定</button>
-    </nav>
-  </header>
+  <!-- ホーム -->
+  <section class="screen home" id="home">
+    <header class="top">
+      <h1 class="brand">おしえてラジオ</h1>
+      <nav class="top-nav" aria-label="メニュー">
+        <button type="button" class="link-btn" id="openRecords">記録</button>
+        <button type="button" class="link-btn" id="openSettings">設定</button>
+      </nav>
+    </header>
 
-  <section class="dial-wrap" aria-label="進み具合">
-    <div class="dial" id="dial" role="img" aria-label=""></div>
-    <div class="dial-meta">
-      <span id="posLabel">–</span>
-      <span class="tally"><span class="dot dot-ok"></span>なるほど <b id="okCount">0</b></span>
-      <span class="tally"><span class="dot dot-lost"></span>わからん <b id="lostCount">0</b></span>
+    <p class="lead">聞いて、<br>後輩に説明して、<br>覚える。</p>
+    <p class="how">講師のミナトさんと後輩のヒナの掛け合いを聞いたら、今度はあなたがヒナに説明します。言えなかった所は、ヒナが聞き返してきます。</p>
+
+    <div class="today">
+      <div class="today-head">
+        <h2 class="today-title" id="todayTitle">今日の5枚</h2>
+        <span class="today-time" id="todayTime"></span>
+      </div>
+      <ol class="today-list" id="todayList"></ol>
+    </div>
+
+    <div class="mode" role="radiogroup" aria-label="使い方">
+      <button type="button" role="radio" data-mode="talk" aria-checked="true"><b>話す</b><span>声で説明する</span></button>
+      <button type="button" role="radio" data-mode="listen" aria-checked="false"><b>聞くだけ</b><span>声を出せないとき</span></button>
+    </div>
+
+    <button type="button" class="start" id="startBtn">はじめる</button>
+    <p class="engine" id="engineNote"></p>
+
+    <div class="progress">
+      <div class="progress-head">
+        <span id="deckName"></span>
+        <span id="progressText"></span>
+      </div>
+      <div class="dots" id="dots" role="img"></div>
+      <p class="legend"><span class="lg lg-ok"></span>説明できた <span class="lg lg-part"></span>もう少し <span class="lg lg-lost"></span>まだ言えない</p>
     </div>
   </section>
 
-  <main class="stage" id="stage" aria-live="polite">
-    <!-- はじめの画面 -->
-    <div class="intro" id="intro">
-      <p class="intro-lead">解説を耳で聞く。<br>返事は、あいづちだけ。</p>
-      <ol class="intro-steps">
-        <li>再生すると、1枚ずつ「場面 → 要点 → なぜ → ひっかけ」の順に読み上げます。</li>
-        <li>聞いた1枚について「ぼやく」を押し、自分の言葉で言ってみます。用語ごと文字になって、その1枚に残ります。</li>
-        <li>溜まったぼやきをカードと並べて Claude に渡すと、間違いやあやふやな所を見つけて、補足の教材にしてくれます。</li>
-      </ol>
-      <p class="intro-deck" id="introDeck"></p>
-    </div>
+  <!-- 学習中 -->
+  <section class="screen session" id="session" hidden>
+    <header class="s-top">
+      <button type="button" class="link-btn" id="quitBtn">やめる</button>
+      <div class="s-pos" id="sPos"></div>
+      <button type="button" class="link-btn" id="skipBtn">次へ</button>
+    </header>
+    <h2 class="s-title" id="sTitle"></h2>
+    <ol class="chat" id="chat" aria-live="polite"></ol>
 
-    <!-- カード -->
-    <article class="card" id="card" hidden>
-      <p class="scene seg" data-k="scene" id="segScene"></p>
-      <h2 class="point seg" data-k="point" id="segPoint"></h2>
-      <div class="why seg" data-k="why" id="segWhy"></div>
-      <div class="trap" id="trapBox" hidden>
-        <span class="tag tag-trap">ひっかけ</span>
-        <div class="seg" data-k="trap" id="segTrap"></div>
+    <div class="dock">
+      <div class="turn" id="turn" hidden>
+        <div class="turn-head">
+          <span class="mic" aria-hidden="true"></span>
+          <span class="turn-label" id="turnLabel">あなたの番</span>
+          <span class="turn-time" id="turnTime"></span>
+        </div>
+        <p class="turn-q" id="turnQ"></p>
+        <div class="keys" id="keys" aria-label="入っていてほしい言葉"></div>
+        <p class="live" id="live"></p>
+        <div class="turn-actions">
+          <button type="button" class="btn btn-solid" id="doneBtn">話し終わった</button>
+          <button type="button" class="btn" id="passBtn">わからない</button>
+        </div>
       </div>
-      <div class="easy" id="easyBox" hidden>
-        <span class="tag tag-easy">かみくだくと</span>
-        <div class="seg" data-k="easy" id="segEasy"></div>
-      </div>
-      <div class="lookup" id="lookupBox" hidden>
-        <span class="tag tag-lookup">声で引いた</span>
-        <p class="lookup-term" id="lookupTerm"></p>
-        <div class="seg" data-k="lookup" id="segLookup"></div>
-      </div>
-      <div class="by" id="boyakiBox" hidden>
-        <span class="tag tag-by">この1枚のぼやき</span>
-        <div class="chips" id="boyakiChips"></div>
-        <ul class="by-list" id="boyakiList"></ul>
-      </div>
-      <div class="echo" id="echoBox" hidden>
-        <span class="tag tag-echo">声に出す</span>
-        <div class="chips" id="echoChips"></div>
-      </div>
-    </article>
-
-    <!-- おわりの画面 -->
-    <div class="outro" id="outro" hidden>
-      <p class="outro-lead" id="outroLead"></p>
-      <p class="outro-sub" id="outroSub"></p>
-      <div class="outro-actions">
-        <button type="button" class="btn btn-solid" id="againLost">わからんだけ、もう一周</button>
-        <button type="button" class="btn" id="againAll">最初から流す</button>
-        <button type="button" class="btn" id="outroHandoff">ぼやきを Claude に渡す</button>
+      <div class="s-bar">
+        <button type="button" class="pause" id="pauseBtn" aria-label="一時停止">
+          <svg viewBox="0 0 24 24" class="ic-pause" aria-hidden="true"><path d="M6 4h4v16H6zM14 4h4v16h-4z"/></svg>
+          <svg viewBox="0 0 24 24" class="ic-play" aria-hidden="true"><path d="M7 4l14 8-14 8z"/></svg>
+        </button>
+        <span class="s-status" id="sStatus"></span>
+        <button type="button" class="pill" id="rateBtn" aria-label="話す速さ">1.0倍</button>
       </div>
     </div>
-  </main>
+  </section>
 
-  <div class="dock">
-  <div class="status" id="status" data-state="idle">
-    <span class="lamp" aria-hidden="true"></span>
-    <span class="status-text" id="statusText">再生を押すと始まります</span>
-    <span class="heard" id="heard"></span>
-  </div>
-
-  <div class="replies" id="replies">
-    <button type="button" class="reply reply-ok" data-act="ok"><span class="say">なるほど</span><span class="does">次の1枚へ</span></button>
-    <button type="button" class="reply reply-again" data-act="again"><span class="say">もう一回</span><span class="does">頭から聞き直す</span></button>
-    <button type="button" class="reply reply-lost" data-act="lost"><span class="say">わからん</span><span class="does">かみくだいて聞く</span></button>
-    <button type="button" class="reply reply-memo" data-act="memo"><span class="say">ぼやく</span><span class="does">自分の言葉で言う</span></button>
-  </div>
-
-  <footer class="deck-bar">
-    <button type="button" class="icon-btn" id="prevBtn" aria-label="前の1枚">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5v14M19 5l-9 7 9 7z"/></svg>
-    </button>
-    <button type="button" class="play-btn" id="playBtn" aria-label="再生">
-      <svg viewBox="0 0 24 24" class="ic-play" aria-hidden="true"><path d="M7 4l14 8-14 8z"/></svg>
-      <svg viewBox="0 0 24 24" class="ic-pause" aria-hidden="true"><path d="M6 4h4v16H6zM14 4h4v16h-4z"/></svg>
-    </button>
-    <button type="button" class="icon-btn" id="nextBtn" aria-label="次の1枚">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17 5v14M5 5l9 7-9 7z"/></svg>
-    </button>
-    <button type="button" class="pill" id="rateBtn" aria-label="読み上げの速さ">1.0倍</button>
-    <button type="button" class="pill pill-voice" id="voiceBtn" aria-pressed="false">声で返す</button>
-  </footer>
-  </div>
+  <!-- 結果 -->
+  <section class="screen result" id="result" hidden>
+    <p class="r-lead" id="rLead"></p>
+    <p class="r-sub" id="rSub"></p>
+    <ol class="r-list" id="rList"></ol>
+    <div class="r-actions">
+      <button type="button" class="btn btn-solid" id="moreBtn">もう1セット</button>
+      <button type="button" class="btn" id="rHandoff">説明を Claude に見てもらう（コピー）</button>
+      <p class="hint" id="rHandoffState" role="status"></p>
+      <button type="button" class="btn" id="homeBtn">ホームに戻る</button>
+    </div>
+  </section>
 </div>
 
-<!-- 一覧 -->
-<dialog class="sheet" id="listSheet" aria-labelledby="listTitle">
+<audio id="player" preload="auto" playsinline></audio>
+
+<!-- 記録 -->
+<dialog class="sheet" id="recordsSheet" aria-labelledby="recordsTitle">
   <div class="sheet-head">
-    <h2 id="listTitle">一覧</h2>
+    <h2 id="recordsTitle">記録</h2>
     <button type="button" class="link-btn" data-close>閉じる</button>
   </div>
-  <p class="sheet-note" id="deckTitle"></p>
-  <div class="seg-ctl" role="group" aria-label="流す範囲">
-    <button type="button" data-filter="all" aria-pressed="true">全部</button>
-    <button type="button" data-filter="new" aria-pressed="false">まだの分</button>
-    <button type="button" data-filter="lost" aria-pressed="false">わからん</button>
-    <button type="button" data-filter="weak" aria-pressed="false">苦手な用語</button>
+  <p class="sheet-note">カードごとに、あなたが話した説明が残ります。カードの内容と並べて Claude に渡すと、間違いやあやふやな所を見つけて、補足の教材にしてくれます。</p>
+  <div class="row">
+    <button type="button" class="btn btn-solid" id="handoffBtn">説明を Claude に見てもらう（コピー）</button>
   </div>
-  <p class="sheet-note" id="weakTerms" hidden></p>
-  <ol class="card-list" id="cardList"></ol>
-</dialog>
-
-<!-- メモ -->
-<dialog class="sheet" id="memoSheet" aria-labelledby="memoTitle">
-  <div class="sheet-head">
-    <h2 id="memoTitle">ぼやき</h2>
-    <button type="button" class="link-btn" data-close>閉じる</button>
-  </div>
-  <p class="sheet-note">カードごとに声で残したぼやきです。カードの内容と並べて Claude に渡すと、間違いやあやふやな所を見つけて、補足の教材にしてくれます。</p>
-  <ul class="memo-list" id="memoList"></ul>
-  <p class="empty" id="memoEmpty">まだぼやきはありません。1枚聞いたら「ぼやく」を押して、自分の言葉で言ってみてください。</p>
-  <div class="sheet-actions">
-    <button type="button" class="btn btn-solid" id="handoffBtn">ぼやきを Claude に渡す文面をコピー</button>
-    <span class="hint" id="handoffState" role="status"></span>
-  </div>
-</dialog>
-
-<!-- メモ入力（手入力） -->
-<dialog class="sheet sheet-small" id="memoInput" aria-labelledby="memoInputTitle">
-  <div class="sheet-head">
-    <h2 id="memoInputTitle">ぼやきを書く</h2>
-    <button type="button" class="link-btn" data-close>やめる</button>
-  </div>
-  <textarea id="memoText" rows="4" placeholder="声が使えないときは、ここに書いて残せます"></textarea>
-  <div class="sheet-actions">
-    <button type="button" class="btn btn-solid" id="memoSave">ぼやきを残す</button>
-  </div>
+  <p class="hint" id="handoffState" role="status"></p>
+  <ol class="rec-list" id="recList"></ol>
+  <p class="empty" id="recEmpty">まだ記録はありません。「はじめる」を押して、ヒナに説明してみてください。</p>
 </dialog>
 
 <!-- 設定 -->
@@ -170,8 +130,8 @@
   </div>
 
   <section class="set">
-    <h3>声で返す（AmiVoice）</h3>
-    <p class="sheet-note">AmiVoice API の APPKEY を入れると、あいづちを声で返せます。キーはこの端末のブラウザにだけ保存します。入れなくても、ボタン操作で全部使えます。</p>
+    <h3>声の聞き取り</h3>
+    <p class="sheet-note">AmiVoice API の APPKEY を入れると、EventBridge や Step Functions のような製品名を、辞書つきで正確に聞き取れます。入れない場合は、ブラウザ標準の聞き取りを使います（製品名は崩れやすくなります）。キーはこの端末のブラウザにだけ保存します。</p>
     <label class="field">
       <span>APPKEY</span>
       <input type="password" id="appkey" autocomplete="off" spellcheck="false" placeholder="マイページで発行したキー">
@@ -181,24 +141,36 @@
       <button type="button" class="btn" id="testMic">マイクを試す</button>
     </div>
     <p class="hint" id="keyState" role="status"></p>
-    <label class="check"><input type="checkbox" id="optEcho"><span><b>要点を毎回言い返す</b><br>「声で返す」が入のとき、解説のあとに要点を言い返す時間を入れます。抜けた用語は「苦手な用語」に残ります。</span></label>
-    <label class="check"><input type="checkbox" id="optNolog"><span><b>音声をサーバーに残さない</b><br>ログ保存なしの接続先を使います（料金が変わります）。</span></label>
+    <label class="field">
+      <span>聞き取りに使うもの</span>
+      <select id="optEngine">
+        <option value="auto">自動（キーがあれば AmiVoice）</option>
+        <option value="amivoice">AmiVoice</option>
+        <option value="browser">ブラウザ標準</option>
+      </select>
+    </label>
+    <label class="check"><input type="checkbox" id="optNolog"><span><b>音声をサーバーに残さない</b><br>AmiVoice のログ保存なしの接続先を使います（料金が変わります）。</span></label>
     <p class="hint" id="usage"></p>
   </section>
 
   <section class="set">
-    <h3>流し方</h3>
+    <h3>進め方</h3>
     <label class="field">
-      <span>あいづちを待つ時間</span>
-      <select id="optWait">
-        <option value="4">4秒</option>
-        <option value="6">6秒</option>
-        <option value="10">10秒</option>
-        <option value="0">返事があるまで待つ</option>
+      <span>1セットの枚数</span>
+      <select id="optSize">
+        <option value="3">3枚（約5分）</option>
+        <option value="5">5枚（約8分）</option>
+        <option value="10">10枚（約15分）</option>
       </select>
     </label>
-    <p class="sheet-note">時間内に返事が無ければ「聞いた」として次へ進みます。</p>
-    <label class="check"><input type="checkbox" id="optTrap"><span><b>ひっかけも読み上げる</b></span></label>
+    <label class="field">
+      <span>話し終わりとみなす無音</span>
+      <select id="optQuiet">
+        <option value="2.5">2.5秒</option>
+        <option value="3.5">3.5秒</option>
+        <option value="5">5秒</option>
+      </select>
+    </label>
   </section>
 
   <section class="set">
@@ -210,12 +182,18 @@
     </div>
     <p class="hint" id="deckState" role="status"></p>
     <div class="row">
-      <button type="button" class="btn" id="copyPrompt">ノートから教材を作る AI 用の文面をコピー</button>
+      <button type="button" class="btn" id="copyPrompt">ノートから教材を作る、Claude 用の文面をコピー</button>
     </div>
     <p class="hint" id="promptState" role="status"></p>
+    <p class="sheet-note">読み込んだ教材には録音済みの声が無いため、ブラウザの読み上げで流れます。</p>
     <div class="row">
-      <button type="button" class="btn btn-danger" id="resetStats">聞いた記録を消す</button>
+      <button type="button" class="btn btn-danger" id="resetProgress">記録を消す</button>
     </div>
+  </section>
+
+  <section class="set">
+    <h3>クレジット</h3>
+    <p class="sheet-note">サンプル教材の声：Style-Bert-VITS2 と JVNV コーパスの音声モデル（CC BY-SA 4.0）で生成。音声認識：AmiVoice API。</p>
   </section>
 </dialog>
 

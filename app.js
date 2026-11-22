@@ -1,782 +1,658 @@
-/* あいづちラジオ — 聞いて、あいづちで進む資格勉強ラジオ
- *   読み上げ : ブラウザ標準の speechSynthesis
- *   音声認識 : AmiVoice API（WebSocket / 公式 Wrp ライブラリ）
+/* おしえてラジオ — 聞いて、後輩に説明して、覚える
+ *   声      : 事前に生成した音声ファイル（無い教材はブラウザの読み上げ）
+ *   聞き取り: AmiVoice API（WebSocket / 公式 Wrp ライブラリ）。キーが無ければブラウザ標準
  */
 (function () {
 "use strict";
 
-// ---------------------------------------------------------------- 保存先
+// ================================================================ 保存
 var LS = {
-  key: "aizuchi.appkey",
-  oldKey: "amivoice-drill-appkey-v1", // 旧「反射ドリル」で保存したキーを引き継ぐ
-  settings: "aizuchi.settings",
-  deck: "aizuchi.deck",
-  stats: "aizuchi.stats.",
-  terms: "aizuchi.terms.",
-  memos: "aizuchi.memos",
-  usage: "aizuchi.usage"
+  key: "aizuchi.appkey", oldKey: "amivoice-drill-appkey-v1",
+  settings: "oshiete.settings", deck: "oshiete.deck", progress: "oshiete.progress.", log: "oshiete.log", usage: "aizuchi.usage"
 };
-function lsGet(k, fallback) {
-  try { var v = localStorage.getItem(k); return v === null ? fallback : JSON.parse(v); } catch (e) { return fallback; }
-}
+function lsGet(k, fb) { try { var v = localStorage.getItem(k); return v === null ? fb : JSON.parse(v); } catch (e) { return fb; } }
 function lsSet(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
 function lsRaw(k) { try { return localStorage.getItem(k) || ""; } catch (e) { return ""; } }
-
-var storedSettings = lsGet(LS.settings, {});
-var settings = Object.assign(
-  { voice: false, echo: false, nolog: false, wait: 6, trap: true, rate: 1.0, filter: "all", lastId: "", v: 3 },
-  storedSettings
-);
-if ((storedSettings.v || 1) < 3) { settings.echo = false; settings.v = 3; } // 3版から、声に出すのは「ぼやく」が中心。言い返しは任意
-function saveSettings() { lsSet(LS.settings, settings); }
 function appkey() { return lsRaw(LS.key) || lsRaw(LS.oldKey); }
 
-// ---------------------------------------------------------------- 小道具
+var settings = Object.assign({ mode: "talk", engine: "auto", nolog: false, size: 5, quiet: 3.5, rate: 1.0 }, lsGet(LS.settings, {}));
+function saveSettings() { lsSet(LS.settings, settings); }
+
+// ================================================================ 小道具
 function $(id) { return document.getElementById(id); }
 function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
-function toKata(s) { return s.replace(/[ぁ-ゖ]/g, function (c) { return String.fromCharCode(c.charCodeAt(0) + 0x60); }); }
-function toHira(s) { return s.replace(/[ァ-ヶ]/g, function (c) { return String.fromCharCode(c.charCodeAt(0) - 0x60); }); }
-// 照合用の正規化: 全角→半角、小文字、カタカナ→ひらがな、記号と空白を落とす
-function norm(s) {
-  return toHira(String(s || "").normalize("NFKC").toLowerCase()).replace(/[\s、。，．,.!?！？「」『』（）()・_\-ー〜~]/g, "");
-}
+function toKata(s) { return String(s).replace(/[ぁ-ゖ]/g, function (c) { return String.fromCharCode(c.charCodeAt(0) + 0x60); }); }
+function toHira(s) { return String(s).replace(/[ァ-ヶ]/g, function (c) { return String.fromCharCode(c.charCodeAt(0) - 0x60); }); }
+function norm(s) { return toHira(String(s || "").normalize("NFKC").toLowerCase()).replace(/[\s、。，．,.!?！？「」『』（）()・_\-〜~]/g, ""); }
 function escRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
-function sentences(text) { return (String(text || "").match(/[^。！？]+[。！？]?/g) || []).map(function (s) { return s.trim(); }).filter(Boolean); }
+function pick(a) { return a[Math.floor(Math.random() * a.length)]; }
 
-// ---------------------------------------------------------------- 教材
-var deck = null;      // { id, title, terms:[{w,r}], cards:[{id,scene,point,why,trap,easy}] }
-var stats = {};       // cardId -> { n, last: "heard"|"ok"|"lost" }
-var weak = {};        // 用語の表記 -> "miss"（言い返しで抜けた）| "asked"（声で引いた）
-var playlist = [];    // カードの index の並び（「わからん」は少し先に差し込まれる）
-var pos = 0;
-
-// 旧形式（{trigger, answer, short} の配列）を耳用のカードに機械変換する
-function earify(s) {
-  return String(s || "")
-    .replace(/\\/g, "")
-    .replace(/\s*(→|⇒)\s*/g, "、そこから")
-    .replace(/\s*[＋+]\s*/g, "と")
-    .replace(/\s*＝\s*/g, "は、")
-    .replace(/\s*≠\s*/g, "ではなく")
-    .replace(/✕|×/g, "は不正解")
-    .replace(/[／/](?![a-z])/g, "、")
-    .replace(/—+|―+/g, "、")
-    .replace(/[（(]/g, "。").replace(/[）)]/g, "。")
-    .replace(/。\s*。/g, "。").replace(/、\s*。/g, "。").replace(/\s+/g, " ").trim();
-}
-function normalizeDeck(json) {
+// ================================================================ 教材
+var deck = null, progress = {};
+// 旧形式（scene/point/why/trap/easy だけのカード）も、掛け合いに組み直して流せるようにする
+function normalizeDeck(j) {
   var d;
-  if (Array.isArray(json)) {
-    d = {
-      title: "読み込んだ教材（旧形式から変換）",
-      terms: [],
-      cards: json.filter(function (x) { return x && x.trigger && x.answer; }).map(function (x) {
-        var ans = earify(x.answer);
-        return { scene: earify(x.trigger), point: x.short ? earify(x.short) : (sentences(ans)[0] || ans), why: ans };
-      })
-    };
-  } else if (json && Array.isArray(json.cards)) {
-    d = { id: json.id, title: json.title || "読み込んだ教材", terms: Array.isArray(json.terms) ? json.terms : [], cards: json.cards };
-  } else {
-    throw new Error("教材の形式が違います。cards の配列を持つ JSON を選んでください。");
-  }
-  d.cards = d.cards.filter(function (c) { return c && c.point && (c.why || c.scene); }).map(function (c, i) {
+  if (Array.isArray(j)) d = { title: "読み込んだ教材", terms: [], cards: j.map(function (x) { return { scene: x.trigger, point: x.short || x.answer, why: x.answer }; }) };
+  else if (j && Array.isArray(j.cards)) d = j;
+  else throw new Error("教材の形式が違います。cards の配列を持つ JSON を選んでください。");
+  var terms = (Array.isArray(d.terms) ? d.terms : []).filter(function (t) { return t && t.w && t.r; })
+    .map(function (t) { return { w: String(t.w), r: toHira(String(t.r)) }; })
+    .sort(function (a, b) { return b.w.length - a.w.length; });
+  var cards = d.cards.filter(function (c) { return c && (c.talk || c.point); }).map(function (c, i) {
+    var talk = Array.isArray(c.talk) && c.talk.length ? c.talk.map(function (x) { return { s: x.s === "h" ? "h" : "m", t: String(x.t) }; }) : [
+      c.scene ? { s: "h", t: String(c.scene) } : null, { s: "m", t: String(c.point || "") }, c.why ? { s: "m", t: String(c.why) } : null,
+      c.trap ? { s: "h", t: "ひっかけは、ありますか？" } : null, c.trap ? { s: "m", t: String(c.trap) } : null
+    ].filter(Boolean);
+    var keys = Array.isArray(c.keys) && c.keys.length ? c.keys : termsIn(terms, String(c.point || "")).slice(0, 3).map(function (t) {
+      return { w: t.w, alt: [t.r], q: t.w + "は、どこで出てくるんでしたっけ？", a: String(c.point || "") };
+    });
+    keys = keys.filter(function (k) { return k && k.w; }).map(function (k) {
+      return { w: String(k.w), alt: (k.alt || []).map(String), q: String(k.q || k.w + "は、どうなるんでしたっけ？"), a: String(k.a || c.point || "") };
+    });
     return {
-      id: String(c.id || "c" + (i + 1)),
-      scene: String(c.scene || ""), point: String(c.point), why: String(c.why || ""),
-      trap: String(c.trap || ""), easy: String(c.easy || "")
+      id: String(c.id || "c" + (i + 1)), title: String(c.title || c.point || "カード" + (i + 1)).slice(0, 40),
+      talk: talk, ask: String(c.ask || "じゃあ先輩、今の、わたしに説明してもらえますか？"), keys: keys,
+      point: String(c.point || ""), easy: String(c.easy || c.point || ""),
+      scene: String(c.scene || ""), why: String(c.why || ""), trap: String(c.trap || "")
     };
   });
-  if (!d.cards.length) throw new Error("読み上げられるカードが1枚もありません。point と why を持つカードが必要です。");
-  d.terms = d.terms.filter(function (t) { return t && t.w && t.r; }).map(function (t) { return { w: String(t.w), r: toHira(String(t.r)), d: String(t.d || "") }; });
-  d.terms.sort(function (a, b) { return b.w.length - a.w.length; }); // 長い用語から当てる（GitHub を Git より先に）
-  if (!d.id) d.id = "deck-" + d.cards.length + "-" + norm(d.title).slice(0, 24);
-  return d;
+  if (!cards.length) throw new Error("流せるカードが1枚もありません。");
+  return {
+    id: String(d.id || "deck-" + cards.length + "-" + norm(d.title || "").slice(0, 20)), title: String(d.title || "読み込んだ教材"),
+    cast: d.cast || { m: { name: "ミナト" }, h: { name: "ヒナ" } }, audio: d.audio || "", terms: terms, cards: cards
+  };
 }
-function setDeck(d) {
-  deck = d;
-  stats = lsGet(LS.stats + deck.id, {});
-  weak = lsGet(LS.terms + deck.id, {});
-  buildPlaylist(settings.filter, settings.lastId);
-}
-function saveStats() { lsSet(LS.stats + deck.id, stats); }
-function setWeak(w, v) { if (v) weak[w] = v; else delete weak[w]; lsSet(LS.terms + deck.id, weak); }
-function cardText(c) { return [c.scene, c.point, c.why, c.trap].join(" "); }
-function hasWeakTerm(i) { return termsIn(cardText(deck.cards[i])).some(function (t) { return weak[t.w]; }); }
-function statusOf(i) { var s = stats[deck.cards[i].id]; return s ? s.last : "new"; }
-function buildPlaylist(filter, startId) {
-  var all = deck.cards.map(function (_, i) { return i; });
-  var list = all;
-  if (filter === "new") list = all.filter(function (i) { return statusOf(i) === "new"; });
-  if (filter === "lost") list = all.filter(function (i) { return statusOf(i) === "lost"; });
-  if (filter === "weak") list = all.filter(hasWeakTerm);
-  if (!list.length) { list = all; filter = "all"; }
-  settings.filter = filter;
-  playlist = list;
-  pos = 0;
-  if (startId) {
-    var at = playlist.findIndex(function (i) { return deck.cards[i].id === startId; });
-    if (at >= 0) pos = at;
-  }
-  saveSettings();
-}
-function currentCard() { return deck.cards[playlist[pos]]; }
-
-// 用語辞書: 1つの {表記, 読み} を「読み上げの発音」と「AmiVoice の単語登録」の両方に使う
-function termsIn(text) {
+function termsIn(terms, text) {
   var found = [], rest = String(text || "");
-  deck.terms.forEach(function (t) {
+  terms.forEach(function (t) {
     var re = new RegExp("(^|[^A-Za-z0-9])" + escRe(t.w) + "(?![A-Za-z0-9])");
     if (re.test(rest)) { found.push(t); rest = rest.replace(new RegExp(escRe(t.w), "g"), " "); }
   });
   return found;
 }
-function forSpeech(text) {
-  var out = String(text || "");
-  deck.terms.forEach(function (t) {
-    var re = new RegExp("(^|[^A-Za-z0-9])" + escRe(t.w) + "(?![A-Za-z0-9])", "g");
-    var say = toKata(t.r);
-    out = out.replace(re, "$1" + say).replace(re, "$1" + say);
-  });
+function setDeck(d) { deck = d; progress = lsGet(LS.progress + deck.id, {}); }
+function saveProgress() { lsSet(LS.progress + deck.id, progress); }
+function statusOf(c) { var p = progress[c.id]; return p ? p.last : "new"; }
+
+// 今日の分: もう少し・まだ言えない（古い順）→ まだ聞いていない → 説明できた（古い順）
+function pickToday(n) {
+  var weak = [], fresh = [], done = [];
+  deck.cards.forEach(function (c) { var s = statusOf(c); (s === "new" ? fresh : s === "ok" ? done : weak).push(c); });
+  function byOld(a, b) { return (progress[a.id].t || 0) - (progress[b.id].t || 0); }
+  weak.sort(byOld); done.sort(byOld);
+  var out = weak.slice(0, Math.min(2, n));
+  fresh.concat(weak.slice(out.length), done).forEach(function (c) { if (out.length < n) out.push(c); });
   return out;
 }
-// profileWords（そのセッションだけ有効な単語登録）: 「表記 読み」を | で連結
-var wordCap = 27; // 一度に登録する語数。実機で動作を確かめた 27 語までにする
-function profileWords(terms, cap) {
-  return terms.map(function (t) {
-    var w = t.w.replace(/ /g, "_");
-    if (!/^[A-Za-z0-9_぀-ヿ一-鿿]+$/.test(w)) return "";
-    if (!/^[ぁ-ゖー]+$/.test(t.r)) return "";
-    return w + " " + t.r;
-  }).filter(Boolean).slice(0, cap || 30).join("|");
-}
-// あいづち待ちで送る単語: いまの1枚の用語を先頭に、教材の用語をまとめて登録（声で引けるように）
-function wordsForReply() {
-  var mine = termsIn(cardText(currentCard()));
-  var rest = deck.terms.filter(function (t) { return mine.indexOf(t) < 0; });
-  return profileWords(mine.concat(rest), wordCap);
-}
 
-// ---------------------------------------------------------------- 読み上げ
-var TTS = (function () {
-  var synth = window.speechSynthesis || null;
-  var voice = null;
-  function pickVoice() {
+// ================================================================ 声（再生）
+var player = null;
+var Voice = (function () {
+  var synth = window.speechSynthesis || null, voices = [];
+  function loadVoices() {
     if (!synth) return;
-    var vs = synth.getVoices().filter(function (v) { return /^ja/i.test(v.lang); });
-    voice = vs.find(function (v) { return v.localService; }) || vs[0] || null;
+    var all = synth.getVoices().filter(function (v) { return /^ja/i.test(v.lang); });
+    // 品質の高そうな声を優先（Edge の Natural、Google、Enhanced / Premium）
+    function score(v) { return (/Natural|Neural|Online/i.test(v.name) ? 4 : 0) + (/Premium|Enhanced|拡張|高品質/i.test(v.name) ? 3 : 0) + (/Google/i.test(v.name) ? 2 : 0) + (v.localService ? 0 : 1); }
+    voices = all.sort(function (a, b) { return score(b) - score(a); });
   }
-  if (synth) { pickVoice(); if (synth.addEventListener) synth.addEventListener("voiceschanged", pickVoice); }
+  if (synth) { loadVoices(); if (synth.addEventListener) synth.addEventListener("voiceschanged", loadVoices); }
+  var cur = null; // { stop }
+  function playFile(url) {
+    return new Promise(function (resolve, reject) {
+      var done = false;
+      function fin(ok) { if (done) return; done = true; player.onended = player.onerror = null; clearTimeout(guard); ok ? resolve() : reject(new Error("audio")); }
+      player.onended = function () { fin(true); };
+      player.onerror = function () { fin(false); };
+      cur = { stop: function () { try { player.pause(); } catch (e) {} fin(true); } };
+      player.src = url;
+      player.playbackRate = settings.rate;
+      var guard = setTimeout(function () { fin(false); }, 30000);
+      var p = player.play();
+      if (p && p.catch) p.catch(function () { fin(false); });
+    });
+  }
+  function speakText(who, text) {
+    var say = text;
+    deck.terms.forEach(function (t) {
+      say = say.replace(new RegExp("(^|[^A-Za-z0-9])" + escRe(t.w) + "(?![A-Za-z0-9])", "g"), "$1" + toKata(t.r));
+    });
+    if (!synth) return sleep(Math.min(8000, say.length * 160 / settings.rate));
+    return new Promise(function (resolve) {
+      var done = false;
+      function fin() { if (!done) { done = true; clearTimeout(guard); resolve(); } }
+      var u = new SpeechSynthesisUtterance(say);
+      u.lang = "ja-JP"; u.rate = settings.rate;
+      var v = who === "h" ? (voices[1] || voices[0]) : voices[0];
+      if (v) u.voice = v;
+      u.pitch = who === "h" ? 1.25 : 0.9;
+      u.onend = u.onerror = fin;
+      cur = { stop: function () { try { synth.cancel(); } catch (e) {} fin(); } };
+      var guard = setTimeout(fin, say.length * 400 + 5000);
+      try { synth.speak(u); } catch (e) { fin(); }
+    });
+  }
   return {
-    // 最初のタップの中で一度だけ呼ぶ（iOS は操作の中でしか読み上げを開始できない）
     unlock: function () { if (synth) { try { synth.cancel(); synth.speak(new SpeechSynthesisUtterance(" ")); } catch (e) {} } },
-    cancel: function () { if (synth) { try { synth.cancel(); } catch (e) {} } },
-    say: function (text) {
-      var spoken = forSpeech(text);
-      var guess = spoken.length * 190 / settings.rate + 400;
-      if (!synth) return sleep(Math.min(guess, 6000));
-      return new Promise(function (resolve) {
-        var done = false;
-        function fin() { if (!done) { done = true; clearTimeout(guard); resolve(); } }
-        var u = new SpeechSynthesisUtterance(spoken);
-        u.lang = "ja-JP"; u.rate = settings.rate; if (voice) u.voice = voice;
-        u.onend = fin; u.onerror = fin;
-        var guard = setTimeout(fin, guess * 2.5 + 4000); // onend が来ない端末への保険
-        try { synth.speak(u); } catch (e) { fin(); }
-      });
-    }
+    // url があれば録音済みの声、無ければ読み上げ
+    say: function (who, text, url) {
+      if (url && !window.OSHIETE_NO_AUDIO) return playFile(url).catch(function () { return speakText(who, text); });
+      return speakText(who, text);
+    },
+    stop: function () { if (cur) cur.stop(); cur = null; },
+    setRate: function (r) { player.playbackRate = r; }
   };
 })();
+function clip(c, name) { return deck.audio ? deck.audio + c.id + "/" + name + ".mp3" : ""; }
+function common(name) { return deck.audio ? deck.audio + "common/" + name + ".mp3" : ""; }
+var COMMON = {
+  hello: ["h", "先輩、今日もよろしくお願いします！"],
+  praise1: ["h", "ばっちりです！ よくわかりました。"], praise2: ["h", "完璧です！ わたしも説明できそうです。"],
+  praise3: ["h", "すごい、全部入ってました！"], praise4: ["h", "なるほど！ すっきりしました。"],
+  got1: ["h", "あ、そうでした！"], got2: ["h", "それです、それ！"], got3: ["h", "なるほど、思い出しました！"],
+  again: ["h", "あれ、聞こえなかったです。もう一回お願いします！"],
+  kamikudaku: ["m", "じゃあ、かみくだいて言うね。"], thanks: ["h", "ありがとうございます。また今度、説明してくださいね。"],
+  matome: ["m", "まとめると。"], review: ["h", "先輩、前に教えてもらったやつです。もう一回いいですか？"],
+  think: ["h", "頭の中で、説明してみてください。"], bye: ["h", "今日はここまでです。おつかれさまでした！"]
+};
 
-// マイクが開いた合図（画面を見なくても話しはじめがわかるように）
 var audioCtx = null;
 function beep(freq, ms) {
   try {
     if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     if (audioCtx.state === "suspended") audioCtx.resume();
     var o = audioCtx.createOscillator(), g = audioCtx.createGain();
-    o.frequency.value = freq; g.gain.value = 0.08;
-    o.connect(g); g.connect(audioCtx.destination);
-    o.start(); o.stop(audioCtx.currentTime + ms / 1000);
+    o.frequency.value = freq; g.gain.setValueAtTime(0.0001, audioCtx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.12, audioCtx.currentTime + 0.01);
+    g.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + ms / 1000);
+    o.connect(g); g.connect(audioCtx.destination); o.start(); o.stop(audioCtx.currentTime + ms / 1000 + 0.02);
   } catch (e) {}
 }
 
-// ---------------------------------------------------------------- 音声認識（AmiVoice）
-// 1回の「聞き取り窓」ごとに 接続 → s コマンド → 音声 → e コマンド → 切断 を行う。
-// AmiVoice の課金は発話区間だけなので、窓を短く区切っても無音ぶんは増えない。
-var ASR = (function () {
-  var cur = null;          // 進行中の聞き取り
-  var idle = Promise.resolve();
-  var idleDone = null;
-  var lastError = "";
+// ================================================================ 聞き取り
+function engineName() {
+  if (window.OSHIETE_MOCK_ASR) return "mock";
+  var hasBrowser = !!(window.SpeechRecognition || window.webkitSpeechRecognition);
+  if (settings.engine === "browser") return hasBrowser ? "browser" : "";
+  if (settings.engine === "amivoice") return appkey() && window.Wrp ? "amivoice" : "";
+  return appkey() && window.Wrp ? "amivoice" : hasBrowser ? "browser" : "";
+}
+function friendly(msg) {
+  msg = String(msg || "");
+  if (/authoriz|appkey|verify/i.test(msg)) return "APPKEY を確認してください（期限切れかもしれません）。";
+  if (/NotAllowed|Permission|denied|not-allowed/i.test(msg)) return "マイクが許可されていません。ブラウザの設定でマイクを許可してください。";
+  if (/NotFound|MediaDevices|AudioContext|audio-capture/i.test(msg)) return "マイクを使えません。https で開いているか確認してください。";
+  if (/network/i.test(msg)) return "通信できませんでした。電波を確認してください。";
+  return "声の聞き取りにつながりませんでした。通信と APPKEY を確認してください。";
+}
+function addUsage(ms) {
+  var day = new Date().toISOString().slice(0, 10), u = lsGet(LS.usage, {});
+  if (u.day !== day) u = { day: day, ms: 0 };
+  u.ms += ms; lsSet(LS.usage, u);
+}
+// profileWords（その接続だけ有効な単語登録）: 「表記 よみ」を | でつなぐ。27語まで
+function profileWords(list) {
+  var seen = {};
+  return list.map(function (t) {
+    var w = t.w.replace(/ /g, "_");
+    if (seen[w] || !/^[A-Za-z0-9_぀-ヿ一-鿿]+$/.test(w) || !/^[ぁ-ゖー]+$/.test(t.r)) return "";
+    seen[w] = true; return w + " " + t.r;
+  }).filter(Boolean).slice(0, 27).join("|");
+}
+function wordsFor(c) {
+  var text = c.talk.map(function (x) { return x.t; }).join(" ") + " " + c.keys.map(function (k) { return k.w + " " + k.a; }).join(" ");
+  var mine = termsIn(deck.terms, text);
+  return profileWords(mine.concat(deck.terms.filter(function (t) { return mine.indexOf(t) < 0; })));
+}
 
-  function parse(body) {
-    var r = { text: "", reading: "", conf: -1, ms: 0 };
-    try {
-      var j = JSON.parse(body);
-      r.text = j.text || "";
-      var seg = j.results && j.results[0];
-      if (seg) {
-        r.conf = typeof seg.confidence === "number" ? seg.confidence : -1;
-        r.ms = Math.max(0, (seg.endtime || 0) - (seg.starttime || 0));
-        // spoken（読み・ひらがな）を使うと「もう一回 / もういっかい」の表記ゆれを気にせず照合できる
-        r.reading = (seg.tokens || []).map(function (t) { return t.spoken || ""; }).join("").replace(/[^ぁ-ゖー]/g, "");
+// 1回の「あなたの番」。話し終わり（無音）・ボタン・上限で終わる。
+// opts: { words, maxMs, onLive, onText(全体の途中経過) } → Promise<{ text, reading, spoke, error }>
+var Listener = (function () {
+  var cur = null;
+  function run(opts) {
+    var kind = engineName();
+    if (kind === "mock") return window.OSHIETE_MOCK_ASR(opts, function (c) { cur = c; }).then(function (r) { cur = null; return r; });
+    if (!kind) return Promise.resolve({ text: "", error: "声の聞き取りが使えません。設定を確認してください。" });
+    return new Promise(function (resolve) {
+      var finals = [], partial = "", reading = [], spoke = false, live = false, ended = false, stopping = false;
+      var lastAct = 0, startAt = 0, timer = null, lastError = "";
+      function full() { return finals.join("") + partial; }
+      function finish(extra) {
+        if (ended) return; ended = true; cur = null; clearInterval(timer);
+        resolve(Object.assign({ text: finals.join("") || partial, reading: reading.join(""), spoke: spoke }, extra || {}));
       }
-    } catch (e) {}
-    return r;
-  }
-  function setup() {
-    if (!window.Wrp) return;
-    Wrp.TRACE = function (msg) { if (/^ERROR/.test(msg)) lastError = msg; };
-    Wrp.feedDataResumeEnded = function () {
-      if (cur) cur.onLive();
-      else { try { Wrp.feedDataPause(); } catch (e) {} } // 待っている人がいないのにマイクが開いたら、すぐ閉じる
-    };
-    Wrp.utteranceStarted = function () { if (cur) cur.onSpeech(true); };
-    Wrp.utteranceEnded = function () { if (cur) cur.onSpeech(false); };
-    Wrp.resultUpdated = function (body) { if (cur && cur.onPartial) cur.onPartial(parse(body)); };
-    Wrp.resultFinalized = function (body) { if (cur) cur.onFinal(parse(body)); };
-    Wrp.feedDataPauseEnded = function (reason) { if (cur && reason && reason.code) cur.onError(reason.message || lastError); };
-    Wrp.disconnectEnded = function () {
-      if (idleDone) { idleDone(); idleDone = null; }
-      if (cur) cur.onError(lastError || "接続が切れました");
-    };
-  }
-  function addUsage(ms) {
-    var day = new Date().toISOString().slice(0, 10);
-    var u = lsGet(LS.usage, {});
-    if (u.day !== day) u = { day: day, ms: 0 };
-    u.ms += ms; lsSet(LS.usage, u);
-  }
-  function friendly(msg) {
-    msg = String(msg || "");
-    if (/authoriz|appkey|verify/i.test(msg)) return "APPKEY を確認してください（期限切れかもしれません）。";
-    if (/NotAllowed|Permission|denied/i.test(msg)) return "マイクが許可されていません。ブラウザの設定でマイクを許可してください。";
-    if (/NotFound|MediaDevices|AudioContext/i.test(msg)) return "マイクを使えません。https で開いているか確認してください。";
-    return "音声認識につながりませんでした。通信と APPKEY を確認してください。";
-  }
+      function stop() { // 送るのをやめ、最後の結果を待ってから終わる
+        if (stopping || ended) return; stopping = true;
+        impl.stop();
+        setTimeout(function () { finish(); }, 2500);
+      }
+      function act() { lastAct = Date.now(); }
+      function tick() {
+        if (!live || stopping) return;
+        var now = Date.now();
+        if (opts.onTick) opts.onTick(Math.floor((now - startAt) / 1000));
+        if (now - startAt > opts.maxMs) return stop();
+        if (!spoke && now - startAt > (opts.noSpeechMs || 9000)) return stop();
+        if (spoke && !impl.inUtterance() && now - lastAct > settings.quiet * 1000) return stop();
+      }
+      var impl = kind === "amivoice" ? amivoice() : browser();
+      cur = { stop: stop, cancel: function () { impl.cancel(); finish({ cancelled: true }); } };
+      timer = setInterval(tick, 200);
 
-  // opts: { ms: 待つ時間, words: profileWords, memo: 長めの発話を最後まで聞く, onPartial, onLive }
-  function listen(opts) {
-    if (window.AIZUCHI_MOCK_ASR) return window.AIZUCHI_MOCK_ASR(opts);
-    return idle.then(function () {
-      return new Promise(function (resolve) {
-        var done = false, live = false, speaking = false, spoke = false, stopping = false, finals = [], timer = null, tail = null, cap = null;
-        function finish(extra) {
-          if (done) return;
-          done = true; cur = null;
-          clearTimeout(timer); clearTimeout(tail); clearTimeout(cap);
-          try { Wrp.feedDataPause(); } catch (e) {}
-          var out = { text: "", reading: "", conf: -1, live: live, spoke: spoke, words: opts.words ? opts.words.split("|").length : 0 };
-          if (finals.length) {
-            out.text = finals.map(function (f) { return f.text; }).join(opts.memo ? "\n" : "");
-            out.reading = finals.map(function (f) { return f.reading; }).join("");
-            out.conf = Math.min.apply(null, finals.map(function (f) { return f.conf; }));
-          }
-          resolve(Object.assign(out, extra || {}));
-        }
-        // 送信を止め、残りの結果を受け取ってから終わる（自分で止めたとき・上限に達したとき）
-        function graceful() {
-          if (done || stopping) return;
-          stopping = true; clearTimeout(timer); clearTimeout(tail); clearTimeout(cap);
-          try { Wrp.feedDataPause(); } catch (e) {}
-          setTimeout(function () { finish(); }, 5000);
-        }
-        function onTimeout() {
-          if (speaking) { timer = setTimeout(function () { finish({ timedOut: !finals.length }); }, 4000); return; } // 話している途中なら結果を待つ
-          finish({ timedOut: !finals.length });
-        }
-        var me = cur = {
-          cancel: function () { finish({ cancelled: true }); },
-          stop: graceful,
-          onLive: function () {
-            if (live) return; live = true;
-            beep(880, 90);
-            if (opts.onLive) opts.onLive();
-            timer = setTimeout(onTimeout, opts.ms);
-            if (opts.max) cap = setTimeout(graceful, opts.max);
-          },
-          onSpeech: function (on) { speaking = on; if (on) { spoke = true; clearTimeout(tail); } },
-          onPartial: opts.onPartial,
-          onFinal: function (r) {
-            if (!r.text) return;
-            finals.push(r); addUsage(r.ms);
-            if (!opts.memo) { finish(); return; }
-            clearTimeout(timer); // 話しはじめたら、最初の待ち時間は使わない
-            if (opts.onSeg) opts.onSeg(finals.map(function (f) { return f.text; }).join("\n"));
-            if (stopping) return;
-            clearTimeout(tail);
-            tail = setTimeout(function () { finish(); }, opts.tail || 2500); // 黙ったら終わり
-          },
-          onError: function (msg) {
-            if (done) return;
-            if (stopping) { finish(); return; } // 自分で止めたあとの切断は正常
-            if (!live && opts.words && !opts.retried) { // 単語登録が原因で始められないときは、登録なしでやり直す
-              done = true; cur = null; clearTimeout(timer);
-              wordCap = 27;
-              resolve(listen(Object.assign({}, opts, { words: "", retried: true })));
-              return;
-            }
-            finish({ error: friendly(msg) });
-          }
+      function onLive() { if (live) return; live = true; startAt = lastAct = Date.now(); beep(880, 110); if (opts.onLive) opts.onLive(); }
+      function amivoice() {
+        var inUtt = false;
+        Wrp.TRACE = function (m) { if (/^ERROR/.test(m)) lastError = m; };
+        Wrp.feedDataResumeEnded = function () { if (ended) { try { Wrp.feedDataPause(); } catch (e) {} return; } onLive(); };
+        Wrp.utteranceStarted = function () { inUtt = true; spoke = true; act(); };
+        Wrp.utteranceEnded = function () { inUtt = false; act(); };
+        Wrp.resultUpdated = function (b) {
+          try { var j = JSON.parse(b); partial = String(j.text || "").replace(/_/g, " "); } catch (e) {}
+          if (partial) { spoke = true; act(); if (opts.onText) opts.onText(full()); }
         };
-        lastError = "";
-        idle = new Promise(function (r) { idleDone = r; setTimeout(r, 6000); });
+        Wrp.resultFinalized = function (b) {
+          try {
+            var j = JSON.parse(b), seg = j.results && j.results[0];
+            var t = String(j.text || "").replace(/_/g, " ");
+            if (t) { finals.push(t); spoke = true; }
+            if (seg) {
+              reading.push((seg.tokens || []).map(function (x) { return x.spoken || ""; }).join(""));
+              addUsage(Math.max(0, (seg.endtime || 0) - (seg.starttime || 0)));
+            }
+          } catch (e) {}
+          partial = ""; act(); if (opts.onText) opts.onText(full());
+          if (stopping) finish();
+        };
+        Wrp.feedDataPauseEnded = function (reason) { if (reason && reason.code && !stopping) lastError = reason.message || lastError; };
+        Wrp.disconnectEnded = function () {
+          if (stopping) { setTimeout(function () { finish(); }, 300); return; }
+          finish(live && !lastError ? {} : { error: friendly(lastError || "disconnected") });
+        };
         Wrp.serverURL = settings.nolog ? "wss://acp-api.amivoice.com/v1/nolog/" : "wss://acp-api.amivoice.com/v1/";
         Wrp.grammarFileNames = "-a-general";
         Wrp.authorization = appkey();
         Wrp.profileWords = opts.words || "";
-        Wrp.resultUpdatedInterval = "400";
+        Wrp.resultUpdatedInterval = "300";
         Wrp.keepFillerToken = "";
-        if (window.Recorder) Recorder.maxRecordingTime = opts.max ? opts.max + 10000 : 60000;
-        var started = false;
-        try { started = Wrp.feedDataResume(); } catch (e) { lastError = String(e); }
-        if (!started) { if (idleDone) { idleDone(); idleDone = null; } finish({ error: friendly(lastError) }); return; }
-        setTimeout(function () { if (!live && cur === me) me.onError(lastError || "timeout"); }, 12000);
-      });
+        if (window.Recorder) Recorder.maxRecordingTime = opts.maxMs + 15000;
+        var ok = false;
+        try { ok = Wrp.feedDataResume(); } catch (e) { lastError = String(e); }
+        if (!ok) setTimeout(function () { finish({ error: friendly(lastError) }); }, 0);
+        setTimeout(function () { if (!live && !ended) { try { Wrp.feedDataPause(); } catch (e) {} finish({ error: friendly(lastError || "timeout") }); } }, 12000);
+        return {
+          inUtterance: function () { return inUtt; },
+          stop: function () { try { Wrp.feedDataPause(); } catch (e) {} },
+          cancel: function () { try { Wrp.feedDataPause(); } catch (e) {} }
+        };
+      }
+      function browser() {
+        var R = window.SpeechRecognition || window.webkitSpeechRecognition, rec = new R(), res = [];
+        rec.lang = "ja-JP"; rec.continuous = true; rec.interimResults = true;
+        rec.onstart = onLive;
+        rec.onresult = function (e) {
+          var fin = "", inter = "";
+          for (var i = 0; i < e.results.length; i++) (e.results[i].isFinal ? (fin += e.results[i][0].transcript) : (inter += e.results[i][0].transcript));
+          finals = fin ? [fin] : []; partial = inter; spoke = true; act();
+          if (opts.onText) opts.onText(full());
+        };
+        rec.onerror = function (e) { if (e.error !== "no-speech" && e.error !== "aborted") lastError = e.error; };
+        rec.onend = function () { finish(lastError && !spoke ? { error: friendly(lastError) } : {}); };
+        try { rec.start(); } catch (e) { setTimeout(function () { finish({ error: friendly(String(e)) }); }, 0); }
+        return { inUtterance: function () { return !!partial; }, stop: function () { try { rec.stop(); } catch (e) {} }, cancel: function () { try { rec.abort(); } catch (e) {} } };
+      }
     });
   }
-  setup();
-  return {
-    listen: listen,
-    cancel: function () { if (cur) cur.cancel(); },
-    stop: function () { if (window.AIZUCHI_MOCK_STOP) return window.AIZUCHI_MOCK_STOP(); if (cur) cur.stop(); },
-    ready: function () { return !!(window.AIZUCHI_MOCK_ASR || (window.Wrp && appkey() && navigator.mediaDevices)); }
-  };
+  var control = { stop: function () { if (cur) cur.stop(); }, cancel: function () { if (cur) cur.cancel(); } };
+  return { run: run, stop: function () { control.stop(); }, cancel: function () { control.cancel(); } };
 })();
-function voiceOn() { return settings.voice && ASR.ready(); }
 
-// あいづちの辞書（読みで照合する）。ボタンに書いてある言葉＝声で言える言葉。
-var INTENTS = [
-  // words: 含まれていれば採用 / exact: 短くて紛れやすいので完全一致のみ（漢字は、読みが取れないときの保険）
-  { act: "ok",    words: ["なるほど", "わかった", "わかりました", "分かった", "分かりました", "おっけー", "おーけー", "ok", "りょうかい", "了解", "つぎへ", "次へ", "つぎいって", "つぎにいって"], exact: ["つぎ", "次", "はい", "うん"] },
-  { act: "again", words: ["もういっかい", "もういちど", "もっかい", "もう一回", "もう1回", "もう一度", "くりかえし", "りぴーと", "ききなおし"], exact: [] },
-  { act: "lost",  words: ["わからん", "わからない", "わかりません", "わかんない", "分からん", "分からない", "分かりません", "分かんない", "どういうこと", "むずかしい", "難しい", "むずい", "ぴんとこない"], exact: ["なんで"] },
-  { act: "memo",  words: ["ぼやく", "ぼやき", "ぼやいて", "めもして", "めもする", "しつもん", "質問", "めもをとって"], exact: ["めも"] },
-  { act: "stop",  words: ["すとっぷ", "とめて", "止めて", "いちじていし", "一時停止", "きゅうけい", "休憩"], exact: ["ていし", "停止"] },
-  { act: "back",  words: ["ひとつまえ", "一つ前", "1つ前", "まえにもどって", "もどって", "戻って"], exact: ["まえ", "前", "もどる", "戻る"] }
-];
-var CONF_MIN = 0.5; // これ未満の認識結果は、あいづちとして採用しない
-function detectIntent(r) {
-  var cands = [norm(r.reading), norm(r.text)].filter(Boolean);
-  var best = null;
-  cands.forEach(function (c) {
-    if (c.length > 16) return; // 長い発話はあいづちではない
-    INTENTS.forEach(function (it) {
-      it.exact.forEach(function (w) { if (c === w || c === w + "です") if (!best || w.length > best.len) best = { act: it.act, len: w.length }; });
-      it.words.forEach(function (w) { if (c.indexOf(w) >= 0) if (!best || w.length > best.len) best = { act: it.act, len: w.length }; });
+// 説明に入っていた要素
+function hitKeys(keys, text, reading) {
+  var t = norm(text), rd = norm(reading || "");
+  return keys.map(function (k) {
+    return [k.w].concat(k.alt).some(function (a) {
+      var n = norm(a); if (!n) return false;
+      return t.indexOf(n) >= 0 || (rd && rd.indexOf(norm(toHira(a))) >= 0);
     });
   });
-  return best ? best.act : "";
+}
+var PASS_WORDS = ["わからない", "わからん", "わかりません", "わかんない", "ぱす", "すきっぷ", "おしえて"];
+var AGAIN_WORDS = ["もういっかい", "もういちど", "もう1回", "もう一回", "もう一度", "ききなおし", "くりかえ"];
+function isAgain(text) { var t = norm(text); return t.length <= 14 && AGAIN_WORDS.some(function (w) { return t.indexOf(norm(w)) >= 0; }); }
+function isPass(text) { var t = norm(text); return t.length <= 14 && PASS_WORDS.some(function (w) { return t.indexOf(w) >= 0; }); }
+
+// ================================================================ 画面
+var screens = ["home", "session", "result"];
+function show(name) { screens.forEach(function (s) { $(s).hidden = s !== name; }); window.scrollTo(0, 0); }
+function name(who) { return who === "you" ? "あなた" : (deck.cast[who] && deck.cast[who].name) || (who === "h" ? "ヒナ" : "ミナト"); }
+
+function renderHome() {
+  var today = pickToday(settings.size);
+  $("todayTitle").textContent = "今日の" + today.length + "枚";
+  $("todayTime").textContent = "約" + Math.round(today.length * (settings.mode === "talk" ? 1.6 : 1.1)) + "分";
+  var ol = $("todayList"); ol.textContent = "";
+  today.forEach(function (c) {
+    var li = document.createElement("li"), s = statusOf(c);
+    li.className = "st-" + s;
+    var t = document.createElement("span"); t.className = "t"; t.textContent = c.title;
+    var b = document.createElement("span"); b.className = "b";
+    b.textContent = s === "new" ? "はじめて" : s === "ok" ? "おさらい" : s === "part" ? "もう少し" : "まだ言えない";
+    li.appendChild(t); li.appendChild(b); ol.appendChild(li);
+  });
+  document.querySelectorAll(".mode [data-mode]").forEach(function (b) { b.setAttribute("aria-checked", b.dataset.mode === settings.mode ? "true" : "false"); });
+  var e = engineName();
+  var note = $("engineNote");
+  note.className = "engine";
+  if (settings.mode === "listen") note.textContent = "ヒナに聞かれたら、頭の中で説明してみてください。少し待ってから、ミナトさんがまとめます。";
+  else if (e === "amivoice" || e === "mock") note.textContent = "聞き取り：AmiVoice（このカードの用語を辞書に登録して聞き取ります）";
+  else if (e === "browser") { note.textContent = "聞き取り：ブラウザ標準。製品名が崩れやすいので、設定で AmiVoice の APPKEY を入れるのがおすすめです。"; note.className = "engine warn"; }
+  else { note.textContent = "この端末では声の聞き取りが使えません。設定で AmiVoice の APPKEY を入れるか、「聞くだけ」で使ってください。"; note.className = "engine warn"; }
+  $("deckName").textContent = deck.title;
+  var ok = 0, part = 0, lost = 0, dots = $("dots"); dots.textContent = "";
+  deck.cards.forEach(function (c) {
+    var s = statusOf(c), d = document.createElement("span");
+    d.className = "d d-" + s; dots.appendChild(d);
+    if (s === "ok") ok++; else if (s === "part") part++; else if (s === "lost") lost++;
+  });
+  $("progressText").textContent = "説明できた " + ok + " / " + deck.cards.length;
+  dots.setAttribute("aria-label", deck.cards.length + "枚中、説明できた" + ok + "枚、もう少し" + part + "枚、まだ言えない" + lost + "枚");
 }
 
-// 声で引く: 「Canary って何」「Firehose のカード」、または用語だけを言うと、その用語を引く
-var LOOKUP_CUES = ["ってなに", "ってなん", "ってどういう", "とは", "のかーど", "おしえて", "なんだっけ", "について", "のせつめい", "のいみ", "がわから", "わすれた"];
-function findLookup(r) {
-  var reading = String(r.reading || "").replace(/[^ぁ-ゖー]/g, ""), text = norm(r.text);
-  if (!reading && !text) return null;
-  if ((reading || text).length > 30) return null; // 長い発話は対象外
-  var found = null;
-  deck.terms.some(function (t) {
-    var nw = norm(t.w), nr = norm(t.r);
-    var hit = (nw.length >= 2 && text.indexOf(nw) >= 0)      // 表記で一致（英字の用語）
-           || (nr.length >= 4 && text.indexOf(nr) >= 0)      // カタカナで返ってきた場合
-           || (t.r.length >= 5 && reading.indexOf(t.r) >= 0); // 読みで一致（短い読みは誤爆しやすいので使わない）
-    if (hit) found = t;
-    return hit;
-  });
-  if (!found) return null;
-  var cue = LOOKUP_CUES.some(function (c) { return reading.indexOf(c) >= 0 || text.indexOf(norm(c)) >= 0; });
-  var bare = reading ? reading.length <= found.r.length + 3 : text.length <= norm(found.w).length + 3;
-  return cue || bare ? found : null;
+var chatEl = null;
+function bubble(who, text, cls) {
+  var li = document.createElement("li");
+  li.className = "msg msg-" + who + (cls ? " " + cls : "");
+  var n = document.createElement("span"); n.className = "who"; n.textContent = name(who);
+  var p = document.createElement("p"); p.textContent = text;
+  li.appendChild(n); li.appendChild(p);
+  chatEl.querySelectorAll(".msg.now").forEach(function (x) { x.classList.remove("now"); });
+  li.classList.add("now");
+  chatEl.appendChild(li);
+  li.scrollIntoView({ block: "end", behavior: "smooth" });
+  return li;
 }
-// その用語が要点に出てくる1枚（無ければ本文に出てくる1枚）
-function homeCard(term) {
-  var cur = currentCard();
-  function has(text) { return termsIn(text).indexOf(term) >= 0; }
-  var others = deck.cards.filter(function (c) { return c !== cur; });
-  return others.find(function (c) { return has(c.point); }) || (has(cardText(cur)) ? cur : null) || others.find(function (c) { return has(cardText(c)); }) || null;
-}
+function setStatus(t) { $("sStatus").textContent = t; }
+function fitChat() { window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" }); }
 
-// ---------------------------------------------------------------- 画面
-var el = {};
-function setStatus(state, text, heard) {
-  el.status.dataset.state = state;
-  el.statusText.textContent = text;
-  el.heard.textContent = heard || "";
-}
-function fillSeg(node, text) {
-  node.textContent = "";
-  sentences(text).forEach(function (s) {
-    var span = document.createElement("span");
-    span.className = "s"; span.textContent = s;
-    node.appendChild(span);
-  });
-}
-function renderDial() {
-  el.dial.textContent = "";
-  playlist.forEach(function (ci, i) {
-    var t = document.createElement("span");
-    var st = statusOf(ci);
-    t.className = "tick" + (st !== "new" ? " " + st : "") + ((i + 1) % 5 === 0 ? " fifth" : "") + (i === pos && view === "card" ? " now" : "");
-    el.dial.appendChild(t);
-  });
-  var ok = 0, lost = 0;
-  deck.cards.forEach(function (_, i) { var s = statusOf(i); if (s === "ok") ok++; if (s === "lost") lost++; });
-  el.okCount.textContent = ok; el.lostCount.textContent = lost;
-  el.posLabel.textContent = view === "card" ? (pos + 1) + " / " + playlist.length + " 枚目" : deck.cards.length + " 枚";
-  el.dial.setAttribute("aria-label", playlist.length + "枚中" + (pos + 1) + "枚目。なるほど" + ok + "、わからん" + lost);
-}
-var view = "intro"; // intro | card | outro
-function show(v) {
-  view = v;
-  el.intro.hidden = v !== "intro"; el.card.hidden = v !== "card"; el.outro.hidden = v !== "outro";
-  el.replies.setAttribute("aria-disabled", v === "card" ? "false" : "true");
-  renderDial();
-}
-function renderCard() {
-  var c = currentCard();
-  fillSeg(el.segScene, c.scene); fillSeg(el.segPoint, c.point); fillSeg(el.segWhy, c.why);
-  el.trapBox.hidden = !c.trap; fillSeg(el.segTrap, c.trap);
-  el.easyBox.hidden = true; fillSeg(el.segEasy, c.easy);
-  el.echoBox.hidden = true;
-  el.lookupBox.hidden = true;
-  renderBoyaki();
-  el.card.classList.remove("dim");
-  settings.lastId = c.id; saveSettings();
-  show("card");
-  window.scrollTo(0, 0);
-}
-// 文字になったぼやきから、教材の用語を拾う（英字の表記、またはカタカナの読み）
-function termsSaid(text) {
-  var raw = String(text || "").normalize("NFKC"), t = norm(text);
-  return deck.terms.filter(function (x) {
-    var nw = norm(x.w);
-    return (nw.length >= 2 && t.indexOf(nw) >= 0) || (x.r.length >= 3 && raw.indexOf(toKata(x.r)) >= 0);
-  }).map(function (x) { return x.w; });
-}
-function memosOf(c) { return loadMemos().filter(function (m) { return m.deck === deck.id && m.card === c.id; }); }
-// いまの1枚のぼやきと、要点の用語を言えたかどうか
-function renderBoyaki(liveText) {
-  var c = currentCard(), mine = memosOf(c);
-  var show = mine.length > 0 || liveText !== undefined;
-  el.boyakiBox.hidden = !show;
-  if (!show) return;
-  var said = {};
-  mine.forEach(function (m) { (m.terms || termsSaid(m.text)).forEach(function (w) { said[w] = true; }); });
-  if (liveText) termsSaid(liveText).forEach(function (w) { said[w] = true; });
-  el.boyakiChips.textContent = "";
-  termsIn(c.point + " " + c.why).forEach(function (t) {
-    var s = document.createElement("span"); s.className = "chip" + (said[t.w] ? " hit" : ""); s.textContent = t.w; el.boyakiChips.appendChild(s);
-  });
-  el.boyakiList.textContent = "";
-  if (liveText !== undefined) {
-    var li0 = document.createElement("li"); li0.className = "by-live"; li0.textContent = liveText || "…"; el.boyakiList.appendChild(li0);
-  }
-  mine.slice().reverse().slice(0, 3).forEach(function (m) {
-    var li = document.createElement("li"); li.textContent = m.text; el.boyakiList.appendChild(li);
-  });
-}
-function renderIntro() {
-  el.introDeck.textContent = "いまの教材：" + deck.title + "（" + deck.cards.length + "枚）";
-  show("intro");
-}
-function setPlaying(on) {
-  playing = on;
-  el.playBtn.dataset.playing = on ? "true" : "false";
-  el.playBtn.setAttribute("aria-label", on ? "一時停止" : "再生");
-  if (on) { try { if (navigator.wakeLock) navigator.wakeLock.request("screen").then(function (l) { wake = l; }).catch(function () {}); } catch (e) {} }
-  else if (wake) { try { wake.release(); } catch (e) {} wake = null; }
-}
-function renderVoiceBtn() {
-  el.voiceBtn.setAttribute("aria-pressed", voiceOn() ? "true" : "false");
-  el.voiceBtn.textContent = voiceOn() ? "声で返す：入" : "声で返す：切";
-}
-function flash(act) {
-  var b = el.replies.querySelector('[data-act="' + act + '"]');
-  if (!b) return;
-  b.classList.add("flash"); setTimeout(function () { b.classList.remove("flash"); }, 450);
-}
+// ================================================================ 学習の流れ
+var run = 0, paused = false, set = [], pos = 0, results = [], skipFlag = false;
+var mode = "talk"; // このセットの進め方（聞き取りが使えなくなったら、このセットだけ「聞くだけ」にする）
+var wake = null;
+function alive(tok) { return tok === run; }
+function halt() { run++; Voice.stop(); Listener.cancel(); }
 
-// ---------------------------------------------------------------- 再生の流れ
-var playing = false, wake = null, runId = 0, part = "top";
-function alive(tok) { return tok === runId; }
-function halt() { runId++; TTS.cancel(); ASR.cancel(); if (boyaking) setBoyaking(false); }
-function go(fn) {
-  halt();
-  var tok = runId;
-  return fn(tok).catch(function (e) { console.error(e); if (alive(tok)) { setPlaying(false); setStatus("error", "止まりました。再生を押すと続きから始めます"); } });
-}
-
-async function speakSeg(node, tok) {
-  var spans = node.querySelectorAll(".s");
-  for (var i = 0; i < spans.length; i++) {
-    if (!alive(tok)) return;
-    spans[i].classList.add("on");
-    spans[i].scrollIntoView({ block: "nearest", behavior: "smooth" });
-    await TTS.say(spans[i].textContent);
-    spans[i].classList.remove("on"); spans[i].classList.add("done");
-  }
-}
-function mark(card, last) {
-  var s = stats[card.id] || { n: 0, last: "new" };
-  if (last === "heard") { s.n++; if (s.last === "new") s.last = "heard"; } else { s.last = last; }
-  stats[card.id] = s; saveStats(); renderDial();
-}
-// 「わからん」の1枚は、3枚あとにもう一度流す
-function requeue() {
-  var ci = playlist[pos];
-  if (playlist.indexOf(ci, pos + 1) >= 0) return;
-  playlist.splice(Math.min(pos + 4, playlist.length), 0, ci);
-}
-
-async function playCard(tok, which) {
-  part = which || "top";
-  var c = currentCard();
-  setPlaying(true);
-  if (part === "top") {
-    renderCard();
-    el.card.classList.add("dim");
-    setStatus("speaking", "読み上げ中");
-    var order = [el.segScene, el.segPoint, el.segWhy];
-    if (c.trap && settings.trap) order.push(el.segTrap);
-    for (var i = 0; i < order.length; i++) {
-      await speakSeg(order[i], tok); if (!alive(tok)) return;
-      await sleep(280); if (!alive(tok)) return;
-    }
-    el.card.classList.remove("dim");
-    mark(c, "heard");
-    if (settings.echo && voiceOn()) { await echoStep(tok, c); if (!alive(tok)) return; }
-  } else {
-    el.easyBox.hidden = false;
-    setStatus("speaking", "かみくだいて読み上げ中");
-    await TTS.say("かみくだくと。"); if (!alive(tok)) return;
-    await speakSeg(el.segEasy, tok); if (!alive(tok)) return;
-  }
-  await replyStep(tok);
-}
-
-// 要点を声に出す（復唱）。正誤はつけず、言えた用語を点灯するだけ。
-async function echoStep(tok, c) {
-  var targets = termsIn(c.point);
-  if (!targets.length) return;
-  el.echoBox.hidden = false;
-  el.echoChips.textContent = "";
-  var chips = targets.map(function (t) {
-    var s = document.createElement("span"); s.className = "chip"; s.textContent = t.w; el.echoChips.appendChild(s); return s;
-  });
-  el.echoBox.scrollIntoView({ block: "nearest", behavior: "smooth" });
-  setStatus("speaking", "読み上げ中");
-  await TTS.say("要点を、声に出してどうぞ。"); if (!alive(tok)) return;
-  setStatus("listening", "要点を声に出してどうぞ");
-  var r = await ASR.listen({ ms: 9000, words: profileWords(targets), onPartial: function (p) { el.heard.textContent = p.text; } });
+async function say(tok, who, text, url) {
   if (!alive(tok)) return;
-  if (r.error) { voiceFailed(r.error); setPlaying(false); halt(); return; }
-  if (!r.text) { setStatus("speaking", "読み上げ中"); return; }
-  var said = norm(r.text), reading = r.reading, missed = [];
-  targets.forEach(function (t, i) {
-    var hit = said.indexOf(norm(t.w)) >= 0 || said.indexOf(t.r) >= 0 || reading.indexOf(t.r.replace(/ー/g, "")) >= 0 || reading.indexOf(t.r) >= 0;
-    chips[i].classList.add(hit ? "hit" : "miss");
-    if (hit) { if (weak[t.w] === "miss") setWeak(t.w, null); } else { missed.push(t); setWeak(t.w, "miss"); }
+  bubble(who, text);
+  setStatus(name(who) + "が話しています");
+  await Voice.say(who, text, url);
+  if (alive(tok)) await sleep(220);
+}
+async function sayCommon(tok, key) { var c = COMMON[key]; await say(tok, c[0], c[1], common(key)); }
+
+// キーのチップ（言うまで中身を伏せる）
+function renderKeys(keys, hits, reveal) {
+  var box = $("keys"); box.textContent = "";
+  keys.forEach(function (k, i) {
+    var s = document.createElement("span");
+    s.className = "key" + (hits[i] ? " hit" : reveal ? " miss" : "");
+    s.textContent = hits[i] || reveal ? k.w : "？？？";
+    box.appendChild(s);
   });
-  setStatus("speaking", "読み上げ中", "「" + r.text + "」");
-  if (!missed.length) { await TTS.say("言えました。"); return; }
-  await TTS.say(missed.map(function (t) { return toKata(t.r); }).join("、") + "、が抜けました。要点をもう一度。"); if (!alive(tok)) return;
-  await TTS.say(c.point);
 }
 
-// 声で引いた用語を読む。終わったら、もとの1枚のあいづち待ちに戻る。
-async function lookupStep(tok, term, heard) {
-  var cur = currentCard(), home = homeCard(term);
-  setWeak(term.w, "asked");
-  var text = term.d;
-  if (home && home !== cur) text += (text ? "この用語が出てくる1枚の要点は、" : "") + home.point + (!term.d && home.easy ? home.easy : "");
-  else if (!text && home) text = home.easy || home.point;
-  el.lookupTerm.textContent = term.w;
-  fillSeg(el.segLookup, text || "この教材には、この用語の説明がありません。");
-  el.lookupBox.hidden = false;
-  el.lookupBox.scrollIntoView({ block: "nearest", behavior: "smooth" });
-  setPlaying(true);
-  setStatus("speaking", "引いた用語を読み上げ中", heard ? "「" + heard + "」" : "");
-  await TTS.say(toKata(term.r) + "。"); if (!alive(tok)) return;
-  await speakSeg(el.segLookup, tok); if (!alive(tok)) return;
-  await replyStep(tok);
-}
-
-function voiceFailed(msg) {
-  settings.voice = false; saveSettings(); renderVoiceBtn();
-  setStatus("error", msg + " ボタンで続けられます。");
-}
-
-async function replyStep(tok) {
-  var waitMs = settings.wait > 0 ? settings.wait * 1000 : 0;
-  if (voiceOn()) {
-    for (var tries = 0; tries < 3; tries++) {
-      setStatus("listening", "あいづちか、用語をどうぞ");
-      var r = await ASR.listen({ ms: waitMs || 50000, words: wordsForReply(), onPartial: function (p) { el.heard.textContent = p.text; } });
+// あなたの番
+async function yourTurn(tok, c, keys, opts) {
+  var hits = keys.map(function () { return false; });
+  var turn = $("turn");
+  $("turnLabel").textContent = opts.label || "あなたの番";
+  $("turnQ").textContent = opts.question || "";
+  $("turnTime").textContent = "";
+  $("live").textContent = "";
+  $("live").classList.remove("said");
+  renderKeys(keys, hits, false);
+  turn.hidden = false; turn.dataset.state = "connecting"; fitChat();
+  setStatus("つないでいます");
+  var r = await Listener.run({
+    words: wordsFor(c), maxMs: opts.maxMs || 75000, noSpeechMs: opts.noSpeechMs || 10000,
+    onLive: function () { if (!alive(tok)) return; turn.dataset.state = "live"; setStatus("どうぞ。話し終わったら少し黙ってください"); },
+    onTick: function (s) { if (alive(tok)) $("turnTime").textContent = Math.floor(s / 60) + ":" + ("0" + (s % 60)).slice(-2); },
+    onText: function (t) {
       if (!alive(tok)) return;
-      if (r.error) { voiceFailed(r.error); setPlaying(false); return; } // 理由を読めるよう、ここで止める
-      if (r.timedOut || !r.text) { if (waitMs) break; continue; }
-      var sure = !(r.conf >= 0 && r.conf < CONF_MIN);
-      var term = sure ? findLookup(r) : null;
-      if (term) { var heard = r.text; return go(function (t2) { return lookupStep(t2, term, heard); }); }
-      var act = sure ? detectIntent(r) : "";
-      if (act) { setStatus("listening", "あいづちか、用語をどうぞ", "「" + r.text + "」"); return doAct(act); }
-      setStatus("listening", "もう一度どうぞ", "「" + r.text + "」は、あいづちにも用語にも当たりませんでした");
-      await sleep(900); if (!alive(tok)) return;
+      $("live").textContent = t;
+      var h = hitKeys(keys, t, "");
+      if (h.some(function (x, i) { return x && !hits[i]; })) { hits = hits.map(function (x, i) { return x || h[i]; }); renderKeys(keys, hits, false); beep(1320, 60); }
     }
-    if (!waitMs) { setStatus("waiting", "ボタンで返してください"); setPlaying(false); return; }
-  } else {
-    setStatus("waiting", "あいづちをどうぞ", waitMs ? "返事が無ければ次へ進みます" : "");
-    if (!waitMs) return; // 返事があるまで待つ
-    await sleep(waitMs); if (!alive(tok)) return;
-  }
-  advance(1);
-}
-
-function advance(step) {
-  var next = pos + step;
-  if (next < 0) next = 0;
-  if (next >= playlist.length) { finishDeck(); return; }
-  pos = next;
-  go(function (tok) { return playCard(tok, "top"); });
-}
-function finishDeck() {
-  halt(); setPlaying(false);
-  var ok = 0, lost = 0;
-  deck.cards.forEach(function (_, i) { var s = statusOf(i); if (s === "ok") ok++; if (s === "lost") lost++; });
-  el.outroLead.textContent = lost ? "ひととおり聞きました。" : "ひととおり聞きました。わからんは残っていません。";
-  el.outroSub.textContent = deck.cards.length + "枚のうち、なるほど " + ok + "枚、わからん " + lost + "枚。";
-  el.againLost.hidden = !lost;
-  el.outroHandoff.hidden = !lost && !loadMemos().length;
-  show("outro");
-  setStatus("idle", "おつかれさまでした");
-}
-
-// あいづち（声・ボタン共通）
-function doAct(act) {
-  if (view !== "card") return;
-  var c = currentCard();
-  flash(act);
-  if (act === "ok") { if (part === "top") mark(c, "ok"); advance(1); }
-  else if (act === "again") { go(function (tok) { return playCard(tok, "top"); }); }
-  else if (act === "lost") {
-    mark(c, "lost"); requeue(); renderDial();
-    if (c.easy) go(function (tok) { return playCard(tok, "easy"); });
-    else go(async function (tok) { setPlaying(true); setStatus("speaking", "読み上げ中"); await TTS.say("あとでもう一度流します。"); if (alive(tok)) advance(1); });
-  }
-  else if (act === "memo") { if (boyaking) ASR.stop(); else go(memoStep); }
-  else if (act === "stop") { pause(); }
-  else if (act === "back") { advance(-1); }
-}
-function pause() {
-  halt(); setPlaying(false);
-  if (view === "card") setStatus("idle", "一時停止中");
-}
-
-// ---------------------------------------------------------------- メモ
-function loadMemos() { return lsGet(LS.memos, []); }
-function addMemo(text) {
-  var c = currentCard();
-  var list = loadMemos();
-  list.push({ deck: deck.id, card: c.id, of: c.point, text: text, terms: termsSaid(text), t: Date.now() });
-  lsSet(LS.memos, list); renderMemoCount(); renderBoyaki();
-}
-function renderMemoCount() {
-  var n = loadMemos().length;
-  el.memoCount.hidden = !n; el.memoCount.textContent = n;
-}
-var boyaking = false;
-function setBoyaking(on) {
-  boyaking = on;
-  var b = el.replies.querySelector('[data-act="memo"]');
-  b.classList.toggle("rec", on);
-  b.querySelector(".say").textContent = on ? "止める" : "ぼやく";
-  b.querySelector(".does").textContent = on ? "ぼやきを保存する" : "自分の言葉で言う";
-}
-// いまの1枚について、自分の言葉でぼやく。黙るか「止める」で保存し、あいづち待ちに戻る。
-async function memoStep(tok) {
-  if (!ASR.ready()) { // APPKEY が無いときは手で書く
-    setPlaying(false); setStatus("idle", "ぼやきを入力中");
-    $("memoText").value = ""; $("memoInput").showModal(); $("memoText").focus();
-    return;
-  }
-  setPlaying(true);
-  setStatus("memo", "つないでいます");
-  renderBoyaki("");
-  el.boyakiBox.scrollIntoView({ block: "nearest", behavior: "smooth" });
-  setBoyaking(true);
-  var r = await ASR.listen({
-    ms: 15000, memo: true, tail: 6000, max: 180000, words: wordsForReply(),
-    onLive: function () { if (alive(tok)) setStatus("memo", "この1枚についてどうぞ", "黙ると保存します"); },
-    onPartial: function (p) { if (alive(tok)) el.heard.textContent = p.text; },
-    onSeg: function (text) { if (alive(tok)) { renderBoyaki(text); el.heard.textContent = ""; } }
   });
-  setBoyaking(false);
-  if (!alive(tok)) { renderBoyaki(); return; }
-  if (r.error) { renderBoyaki(); setStatus("error", r.error); setPlaying(false); return; }
-  if (r.text) {
-    addMemo(r.text);
-    setStatus("speaking", "ぼやきを保存しました");
-    await TTS.say("保存しました。");
+  turn.dataset.state = "done";
+  if (!alive(tok)) return null;
+  var final = hitKeys(keys, r.text || "", r.reading || "");
+  hits = hits.map(function (x, i) { return x || final[i]; });
+  r.hits = hits;
+  return r;
+}
+
+function hideTurn() { $("turn").hidden = true; }
+
+async function playCard(tok, c, idx) {
+  chatEl = $("chat"); chatEl.textContent = "";
+  hideTurn();
+  $("sPos").textContent = (idx + 1) + " / " + set.length;
+  $("sTitle").textContent = c.title;
+  var before = statusOf(c), talkDone = false;
+  var res = { card: c, result: "heard", hits: c.keys.map(function () { return false; }), text: "" };
+
+  async function talk() { for (var i = 0; i < c.talk.length; i++) await say(tok, c.talk[i].s, c.talk[i].t, clip(c, "t" + i)); talkDone = true; }
+
+  // おさらいの1枚は、いきなり説明から（思い出す練習）
+  var recall = before === "ok" && mode === "talk";
+  if (recall) await sayCommon(tok, "review"); else await talk();
+  if (!alive(tok)) return null;
+  await say(tok, "h", c.ask, clip(c, "ask"));
+  if (!alive(tok)) return null;
+
+  async function thinkOnly() { // 聞くだけ: 頭の中で説明する時間をとって、ミナトがまとめる
+    await sayCommon(tok, "think");
+    for (var s = 6; s > 0 && alive(tok); s--) { setStatus("頭の中で説明してみてください（あと" + s + "秒）"); await sleep(1000); }
+    await sayCommon(tok, "matome");
+    await say(tok, "m", c.point, clip(c, "point"));
+    return res;
+  }
+  function failed(err) { // 聞き取りが使えない → このセットは聞くだけで続ける
+    hideTurn(); mode = "listen";
+    bubble("h", err + " このセットは、聞くだけで進めますね。", "err");
+    return thinkOnly();
+  }
+  if (mode === "listen") return thinkOnly();
+
+  var r = await yourTurn(tok, c, c.keys, { question: c.ask });
+  if (!alive(tok)) return null;
+  if (r.error) return failed(r.error);
+  if (!r.text && !r.cancelled) { // 聞こえなかったら、もう一回だけ
+    hideTurn();
+    await sayCommon(tok, "again");
+    r = await yourTurn(tok, c, c.keys, { question: c.ask });
+    if (!alive(tok)) return null;
+    if (r.error) return failed(r.error);
+  }
+  if (r.text && isAgain(r.text) && !r.hits.some(Boolean)) { // 「もう一回」: 掛け合いを聞き直して、もう一度説明
+    hideTurn(); bubble("you", r.text);
+    await talk(); if (!alive(tok)) return null;
+    await say(tok, "h", c.ask, clip(c, "ask")); if (!alive(tok)) return null;
+    r = await yourTurn(tok, c, c.keys, { question: c.ask });
+    if (!alive(tok)) return null;
+    if (r.error) return failed(r.error);
+  }
+  hideTurn();
+  if (r.text) bubble("you", r.text);
+  res.text = r.text || ""; res.hits = r.hits;
+  var hitCount = r.hits.filter(Boolean).length;
+
+  if (r.cancelled || !r.text || isPass(r.text) || hitCount === 0) {
+    if (recall && !talkDone) { await talk(); }
+    else { await sayCommon(tok, "kamikudaku"); await say(tok, "m", c.easy, clip(c, "easy")); }
+    await sayCommon(tok, "thanks");
+    res.result = "lost";
+    return res;
+  }
+  if (hitCount === c.keys.length) {
+    await sayCommon(tok, pick(["praise1", "praise2", "praise3", "praise4"]));
+    res.result = "ok";
+    return res;
+  }
+  // 抜けた所をひとつ聞き返す
+  var mi = r.hits.indexOf(false), k = c.keys[mi];
+  await say(tok, "h", k.q, clip(c, "k" + mi + "q"));
+  if (!alive(tok)) return null;
+  var r2 = await yourTurn(tok, c, [k], { label: "あなたの番（聞き返し）", question: k.q, maxMs: 30000, noSpeechMs: 8000 });
+  if (!alive(tok)) return null;
+  hideTurn();
+  if (r2 && r2.text) { bubble("you", r2.text); res.text += "\n（聞き返しへの答え）" + r2.text; }
+  if (r2 && !r2.error && r2.hits[0] && !isPass(r2.text)) {
+    res.hits[mi] = true;
+    await sayCommon(tok, pick(["got1", "got2", "got3"]));
   } else {
-    renderBoyaki();
-    setStatus("speaking", "読み上げ中");
-    await TTS.say("聞き取れませんでした。");
+    await say(tok, "m", k.a, clip(c, "k" + mi + "a"));
+  }
+  if (res.hits.filter(Boolean).length < c.keys.length) {
+    await sayCommon(tok, "matome");
+    await say(tok, "m", c.point, clip(c, "point"));
+  }
+  res.result = res.hits.every(Boolean) ? "ok" : "part";
+  return res;
+}
+
+function record(res) {
+  if (!res) return;
+  var c = res.card, p = progress[c.id] || { n: 0 };
+  p.n++; p.t = Date.now();
+  if (res.result !== "heard") p.last = res.result; else if (!p.last) p.last = "part";
+  progress[c.id] = p; saveProgress();
+  if (res.text) {
+    var log = lsGet(LS.log, []);
+    log.push({ deck: deck.id, card: c.id, t: Date.now(), text: res.text, hit: c.keys.filter(function (_, i) { return res.hits[i]; }).map(function (k) { return k.w; }), miss: c.keys.filter(function (_, i) { return !res.hits[i]; }).map(function (k) { return k.w; }), result: res.result });
+    lsSet(LS.log, log.slice(-400));
+  }
+}
+
+async function runSet(tok, startAt) {
+  for (pos = startAt; pos < set.length; pos++) {
+    if (!alive(tok)) return;
+    skipFlag = false;
+    var res = await playCard(tok, set[pos], pos);
+    if (!alive(tok)) return;
+    results[pos] = res; record(res);
+    await sleep(500);
   }
   if (!alive(tok)) return;
-  await replyStep(tok);
-}
-function renderMemos() {
-  var list = loadMemos();
-  el.memoList.textContent = "";
-  $("memoEmpty").hidden = !!list.length;
-  list.forEach(function (m, i) {
-    var li = document.createElement("li");
-    var t = document.createElement("span"); t.className = "m-text"; t.textContent = m.text;
-    var of = document.createElement("span"); of.className = "m-of"; of.textContent = m.of;
-    var del = document.createElement("button"); del.type = "button"; del.className = "link-btn m-del"; del.textContent = "消す";
-    del.addEventListener("click", function () { var l = loadMemos(); l.splice(i, 1); lsSet(LS.memos, l); renderMemos(); renderMemoCount(); });
-    li.appendChild(t); li.appendChild(of); li.appendChild(del);
-    el.memoList.appendChild(li);
-  });
+  await sayCommon(tok, "bye");
+  if (!alive(tok)) return;
+  finishSet();
 }
 
-// ---------------------------------------------------------------- 生成 AI への受け渡し（コピーして貼るだけ。API キー不要）
+function startSet() {
+  Voice.unlock(); beep(1, 1);
+  set = pickToday(settings.size); results = []; pos = 0; paused = false; mode = settings.mode;
+  show("session"); setPaused(false);
+  try { if (navigator.wakeLock) navigator.wakeLock.request("screen").then(function (l) { wake = l; }).catch(function () {}); } catch (e) {}
+  halt(); var tok = run;
+  chatEl = $("chat"); chatEl.textContent = "";
+  $("sPos").textContent = ""; $("sTitle").textContent = "";
+  // あいさつはタップの中で鳴らす（iPhone は操作の中でしか音を出し始められない）。マイクの許可も同時にもらう
+  var hello = sayCommon(tok, "hello");
+  var mic = Promise.resolve();
+  if (settings.mode === "talk" && engineName() && engineName() !== "mock" && navigator.mediaDevices) {
+    mic = navigator.mediaDevices.getUserMedia({ audio: true }).then(function (s) { s.getTracks().forEach(function (t) { t.stop(); }); },
+      function () { mode = "listen"; bubble("h", "マイクが使えないので、このセットは聞くだけで進めますね。", "err"); });
+  }
+  (async function () {
+    await Promise.all([hello, mic]);
+    await runSet(tok, 0);
+  })().catch(function (e) { console.error(e); setStatus("止まりました。もう一度はじめてください"); });
+}
+function setPaused(on) {
+  paused = on;
+  $("pauseBtn").dataset.paused = on ? "true" : "false";
+  $("pauseBtn").setAttribute("aria-label", on ? "続ける" : "一時停止");
+}
+function pauseSet() { if (paused) return; halt(); hideTurn(); setPaused(true); setStatus("一時停止中。▶ で、この1枚の最初から"); }
+function resumeSet() { if (!paused) return; setPaused(false); Voice.unlock(); var tok = run; runSet(tok, pos).catch(function (e) { console.error(e); }); }
+function skipCard() { halt(); hideTurn(); setPaused(false); var tok = run; runSet(tok, pos + 1).catch(function (e) { console.error(e); }); }
+function quitSet() {
+  halt(); hideTurn();
+  if (wake) { try { wake.release(); } catch (e) {} wake = null; }
+  if (results.filter(Boolean).length) finishSet(); else { show("home"); renderHome(); }
+}
+
+function finishSet() {
+  halt();
+  if (wake) { try { wake.release(); } catch (e) {} wake = null; }
+  var done = results.filter(Boolean);
+  var ok = done.filter(function (r) { return r.result === "ok"; }).length;
+  var talked = done.filter(function (r) { return r.result !== "heard"; }).length;
+  $("rLead").textContent = talked ? done.length + "枚中 " + ok + "枚、\n説明できました。" : done.length + "枚、聞きました。";
+  $("rSub").textContent = talked ? "言えなかった言葉は、次のセットで先に出てきます。" : "次は「話す」で、ヒナに説明してみてください。";
+  var ol = $("rList"); ol.textContent = "";
+  done.forEach(function (r) {
+    var li = document.createElement("li"); li.className = "r-item st-" + r.result;
+    var h = document.createElement("div"); h.className = "r-head";
+    var t = document.createElement("span"); t.className = "t"; t.textContent = r.card.title;
+    var b = document.createElement("span"); b.className = "b";
+    b.textContent = { ok: "説明できた", part: "もう少し", lost: "まだ言えない", heard: "聞いた" }[r.result];
+    h.appendChild(t); h.appendChild(b); li.appendChild(h);
+    if (r.result !== "heard") {
+      var k = document.createElement("div"); k.className = "keys";
+      r.card.keys.forEach(function (key, i) { var s = document.createElement("span"); s.className = "key " + (r.hits[i] ? "hit" : "miss"); s.textContent = key.w; k.appendChild(s); });
+      li.appendChild(k);
+    }
+    if (r.text) { var p = document.createElement("p"); p.className = "said"; p.textContent = "「" + r.text.replace(/\n（聞き返しへの答え）/, "」「") + "」"; li.appendChild(p); }
+    ol.appendChild(li);
+  });
+  $("rHandoff").hidden = !done.some(function (r) { return r.text; });
+  $("rHandoffState").textContent = "";
+  show("result");
+}
+
+// ================================================================ Claude への受け渡し（コピーして貼る）
 var FORMAT_NOTE = [
-  "出力は次の JSON だけにしてください。",
-  '{ "title": "教材名", "terms": [{"w": "EventBridge", "r": "いべんとぶりっじ", "d": "イベントを受け取って次の処理へ渡す中継役です。"}], "cards": [{"id": "c01", "scene": "", "point": "", "why": "", "trap": "", "easy": ""}] }',
+  "教材は次の JSON 形式で、コードブロックに入れて出力してください。",
+  '{ "title": "教材名", "terms": [{"w": "EventBridge", "r": "いべんとぶりっじ"}], "cards": [ {',
+  '  "id": "c01", "title": "20字以内の題",',
+  '  "talk": [{"s": "h", "t": "後輩ヒナの質問"}, {"s": "m", "t": "講師ミナトの説明"}],',
+  '  "ask": "ヒナが先輩（学習者）に説明を頼むひとこと",',
+  '  "keys": [{"w": "説明に入っていてほしい言葉", "alt": ["言い換え", "ひらがなの読み"], "q": "抜けたときのヒナの聞き返し", "a": "ミナトの短い答え"}],',
+  '  "point": "要点を1文で", "easy": "たとえ話での言い換え", "scene": "場面", "why": "理由", "trap": "ひっかけ"',
+  '} ] }',
   "",
   "書き方のルール（目ではなく耳で聞く教材です）:",
-  "- scene: どんな場面・要件の話か。1〜2文。",
-  "- point: 覚える要点。1文、40字以内。",
-  "- why: なぜそうなるか。3〜4文。1文は50字以内。",
-  "- trap: 試験で間違えやすい選択肢と、外れる理由。2〜3文。無ければ空文字。",
-  "- easy: 専門用語を減らした、たとえ話による言い換え。2〜3文。",
-  "- 矢印、プラス、イコール、括弧、箇条書きなどの記号は使わず、話し言葉の文にする。",
-  "- 英字の製品名や略語は本文では英字のまま書き、すべて terms に {表記 w, ひらがなの読み r, 1文の短い説明 d} で登録する。"
+  "- talk は、ヒナの質問から始まる5往復以内の掛け合い。1つの台詞は60字以内の話し言葉。",
+  "- ひっかけ（間違えやすい選択肢と、外れる理由）を talk の中に必ず入れる。",
+  "- keys は2〜3個。学習者が説明できたかを判定する言葉。alt に言い換えとひらがなの読みを入れる。",
+  "- 矢印、プラス、イコール、括弧、箇条書きなどの記号は使わない。",
+  "- 英字の製品名や略語は英字のまま書き、すべて terms に {表記 w, ひらがなの読み r} で登録する。"
 ].join("\n");
 function promptForDeck() {
-  return "次のノートを、音声で聞く資格勉強用の教材に書き直してください。\n\n" + FORMAT_NOTE + "\n\n--- ここからノート ---\n（ここにノートや問題集のメモを貼る）";
+  return "次のノートを、耳で聞いて覚える資格勉強の教材にしてください。講師ミナトと後輩ヒナの掛け合いで説明し、最後にヒナが学習者に説明を頼む形です。\n\n" + FORMAT_NOTE + "\n\n--- ここからノート ---\n（ここにノートや問題集のメモを貼る）";
 }
 function promptForHandoff() {
-  var memos = loadMemos().filter(function (m) { return m.deck === deck.id; });
+  var log = lsGet(LS.log, []).filter(function (x) { return x.deck === deck.id; });
   var byCard = {};
-  memos.forEach(function (m) { (byCard[m.card] = byCard[m.card] || []).push(m.text); });
-  var out = ["資格勉強の音声教材を1枚ずつ聞いて、そのカードについて自分の言葉で声に出した「ぼやき」です。音声認識の結果そのままなので、言い間違いや誤字が混じっています。", ""];
-  deck.cards.forEach(function (c, i) {
-    var mine = byCard[c.id], lost = statusOf(i) === "lost";
-    if (!mine && !lost) return;
-    out.push("■ カード: " + c.point + (lost ? "（聞いて「わからん」と答えた）" : ""));
-    out.push("  場面: " + c.scene);
-    out.push("  解説: " + c.why);
+  log.forEach(function (x) { (byCard[x.card] = byCard[x.card] || []).push(x); });
+  var out = ["資格勉強の音声教材を聞いたあと、学習者が後輩に説明するつもりで声に出した説明です。音声認識の結果そのままなので、言い間違いや誤字が混じっています。", ""];
+  deck.cards.forEach(function (c) {
+    var mine = byCard[c.id]; if (!mine) return;
+    out.push("■ カード: " + c.title);
+    out.push("  要点: " + c.point);
+    if (c.why) out.push("  解説: " + c.why);
     if (c.trap) out.push("  ひっかけ: " + c.trap);
-    (mine || []).forEach(function (t) { out.push("  ぼやき: 「" + t.replace(/\n/g, " ") + "」"); });
+    mine.slice(-3).forEach(function (x) {
+      out.push("  学習者の説明: 「" + x.text.replace(/\n/g, " ") + "」" + (x.miss.length ? "（言えなかった言葉: " + x.miss.join("、") + "）" : ""));
+    });
     out.push("");
   });
   out.push("お願い:");
-  out.push("1. カードごとに、ぼやきをカードの内容と照らして、間違っている所とあやふやな所を指摘してください。疑問が含まれていれば答えてください。合っている所は一言で構いません。");
-  out.push("2. 間違いやあやふやがあったカードと、「わからん」のカードについて、別の角度から説明し直した補足カードを作ってください。前提知識が足りていなさそうなら、その前提を説明するカードも足してください。");
+  out.push("1. カードごとに、学習者の説明をカードの内容と照らして、間違っている所とあやふやな所を短く指摘してください。合っている所は一言で構いません。");
+  out.push("2. 間違いやあやふやがあったカードについて、別の角度から説明し直した補足カードを作ってください。前提知識が足りていなさそうなら、その前提を説明するカードも足してください。");
   out.push("");
   out.push(FORMAT_NOTE);
   return out.join("\n");
@@ -793,195 +669,127 @@ function copyText(text, stateEl, okMsg) {
   if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(ok, legacy); else legacy();
 }
 
-// ---------------------------------------------------------------- シート
-function renderList() {
-  $("deckTitle").textContent = deck.title;
-  document.querySelectorAll(".seg-ctl button").forEach(function (b) { b.setAttribute("aria-pressed", b.dataset.filter === settings.filter ? "true" : "false"); });
-  var names = Object.keys(weak);
-  $("weakTerms").hidden = !names.length;
-  $("weakTerms").textContent = "言えていない・声で引いた用語：" + names.join("、");
-  var ol = $("cardList"); ol.textContent = "";
-  deck.cards.forEach(function (c, i) {
-    var li = document.createElement("li");
-    var b = document.createElement("button"); b.type = "button";
-    var inList = playlist.indexOf(i) >= 0;
-    if (view === "card" && playlist[pos] === i) b.className = "now"; else if (!inList) b.className = "off";
-    var m = document.createElement("span"); m.className = "mark " + statusOf(i);
-    var t = document.createElement("span"); t.textContent = c.point;
-    var nb = memosOf(c).length;
-    if (nb) { var by = document.createElement("span"); by.className = "by-count"; by.textContent = "　ぼやき " + nb; t.appendChild(by); }
-    b.appendChild(m); b.appendChild(t);
-    b.addEventListener("click", function () {
-      if (playlist.indexOf(i) < 0) buildPlaylist("all");
-      pos = playlist.indexOf(i);
-      $("listSheet").close();
-      TTS.unlock();
-      go(function (tok) { return playCard(tok, "top"); });
-    });
-    li.appendChild(b); ol.appendChild(li);
+// ================================================================ シート
+function renderRecords() {
+  var log = lsGet(LS.log, []).filter(function (x) { return x.deck === deck.id; }).reverse();
+  var ol = $("recList"); ol.textContent = "";
+  $("recEmpty").hidden = !!log.length; $("handoffBtn").disabled = !log.length;
+  var byId = {}; deck.cards.forEach(function (c) { byId[c.id] = c; });
+  log.slice(0, 60).forEach(function (x) {
+    var c = byId[x.card]; if (!c) return;
+    var li = document.createElement("li"); li.className = "st-" + x.result;
+    var h = document.createElement("div"); h.className = "r-head";
+    var t = document.createElement("span"); t.className = "t"; t.textContent = c.title;
+    var d = new Date(x.t), b = document.createElement("span"); b.className = "when"; b.textContent = (d.getMonth() + 1) + "/" + d.getDate() + " " + d.getHours() + ":" + ("0" + d.getMinutes()).slice(-2);
+    h.appendChild(t); h.appendChild(b); li.appendChild(h);
+    var k = document.createElement("div"); k.className = "keys";
+    x.hit.forEach(function (w) { var s = document.createElement("span"); s.className = "key hit"; s.textContent = w; k.appendChild(s); });
+    x.miss.forEach(function (w) { var s = document.createElement("span"); s.className = "key miss"; s.textContent = w; k.appendChild(s); });
+    li.appendChild(k);
+    var p = document.createElement("p"); p.className = "said"; p.textContent = "「" + x.text.replace(/\n（聞き返しへの答え）/, "」「") + "」"; li.appendChild(p);
+    ol.appendChild(li);
   });
 }
 function renderSettings() {
   $("appkey").value = appkey();
-  $("optEcho").checked = settings.echo; $("optNolog").checked = settings.nolog; $("optTrap").checked = settings.trap;
-  $("optWait").value = String(settings.wait);
+  $("optEngine").value = settings.engine; $("optNolog").checked = settings.nolog;
+  $("optSize").value = String(settings.size); $("optQuiet").value = String(settings.quiet);
   $("deckInfo").textContent = "いまの教材：" + deck.title + "（" + deck.cards.length + "枚）";
-  var u = lsGet(LS.usage, {});
-  var today = new Date().toISOString().slice(0, 10);
-  $("usage").textContent = "今日、声の認識に使った時間：約 " + Math.round((u.day === today ? u.ms : 0) / 1000) + " 秒";
+  var u = lsGet(LS.usage, {}), today = new Date().toISOString().slice(0, 10);
+  $("usage").textContent = "今日、AmiVoice で聞き取った時間：約 " + Math.round((u.day === today ? u.ms : 0) / 1000) + " 秒";
   $("keyState").className = "hint"; $("keyState").textContent = appkey() ? "キーは保存済みです。" : "";
 }
 
-async function enableVoice() {
-  if (!appkey() && !window.AIZUCHI_MOCK_ASR) {
-    renderSettings(); $("settingsSheet").showModal();
-    $("keyState").className = "hint bad"; $("keyState").textContent = "声で返すには APPKEY が必要です。";
-    return;
-  }
-  if (!window.AIZUCHI_MOCK_ASR) {
-    try { // 先にマイクの許可をもらっておく
-      var s = await navigator.mediaDevices.getUserMedia({ audio: true });
-      s.getTracks().forEach(function (t) { t.stop(); });
-    } catch (e) {
-      setStatus("error", "マイクが許可されていません。ブラウザの設定でマイクを許可してください。");
-      return;
-    }
-  }
-  settings.voice = true; saveSettings(); renderVoiceBtn();
-}
-
-// ---------------------------------------------------------------- 起動
+// ================================================================ 起動
 function bind() {
-  ["status", "statusText", "heard", "dial", "okCount", "lostCount", "posLabel", "intro", "introDeck", "card", "outro", "outroLead", "outroSub",
-   "againLost", "outroHandoff", "replies", "playBtn", "voiceBtn", "rateBtn", "segScene", "segPoint", "segWhy", "segTrap", "segEasy",
-   "trapBox", "easyBox", "echoBox", "echoChips", "lookupBox", "lookupTerm", "segLookup", "boyakiBox", "boyakiChips", "boyakiList", "memoCount", "memoList"].forEach(function (id) { el[id] = $(id); });
-
-  el.playBtn.addEventListener("click", function () {
-    if (playing) { pause(); return; }
-    TTS.unlock(); beep(1, 1);
-    if (view === "outro") { buildPlaylist("all"); }
-    go(function (tok) { return playCard(tok, "top"); });
+  player = $("player");
+  $("startBtn").addEventListener("click", startSet);
+  document.querySelectorAll(".mode [data-mode]").forEach(function (b) {
+    b.addEventListener("click", function () { settings.mode = b.dataset.mode; saveSettings(); renderHome(); });
   });
-  $("prevBtn").addEventListener("click", function () { if (view === "card") { TTS.unlock(); advance(-1); } });
-  $("nextBtn").addEventListener("click", function () { if (view === "card") { TTS.unlock(); advance(1); } });
-  el.replies.addEventListener("click", function (e) {
-    var b = e.target.closest("[data-act]"); if (!b) return;
-    TTS.unlock(); doAct(b.dataset.act);
-  });
-  var RATES = [0.9, 1.0, 1.2, 1.5];
-  function renderRate() { el.rateBtn.textContent = settings.rate.toFixed(1) + "倍"; }
-  el.rateBtn.addEventListener("click", function () {
-    settings.rate = RATES[(RATES.indexOf(settings.rate) + 1) % RATES.length]; saveSettings(); renderRate();
-  });
+  $("pauseBtn").addEventListener("click", function () { if (paused) resumeSet(); else pauseSet(); });
+  $("skipBtn").addEventListener("click", skipCard);
+  $("quitBtn").addEventListener("click", quitSet);
+  $("doneBtn").addEventListener("click", function () { Listener.stop(); });
+  $("passBtn").addEventListener("click", function () { Listener.cancel(); });
+  var RATES = [1.0, 1.15, 1.3, 0.9];
+  function renderRate() { $("rateBtn").textContent = (settings.rate === Math.round(settings.rate) ? settings.rate.toFixed(1) : String(settings.rate)) + "倍"; }
+  $("rateBtn").addEventListener("click", function () { settings.rate = RATES[(RATES.indexOf(settings.rate) + 1) % RATES.length]; saveSettings(); Voice.setRate(settings.rate); renderRate(); });
   renderRate();
-  el.voiceBtn.addEventListener("click", function () {
-    if (voiceOn()) { settings.voice = false; saveSettings(); ASR.cancel(); renderVoiceBtn(); }
-    else enableVoice();
-  });
+  $("moreBtn").addEventListener("click", startSet);
+  $("homeBtn").addEventListener("click", function () { show("home"); renderHome(); });
+  $("rHandoff").addEventListener("click", function () { copyText(promptForHandoff(), $("rHandoffState"), "コピーしました。Claude のチャットに貼り付けてください。"); });
 
-  // シートの開閉
   document.querySelectorAll("dialog [data-close]").forEach(function (b) { b.addEventListener("click", function () { b.closest("dialog").close(); }); });
   document.querySelectorAll("dialog").forEach(function (d) { d.addEventListener("click", function (e) { if (e.target === d) d.close(); }); });
-  $("openList").addEventListener("click", function () { renderList(); $("listSheet").showModal(); });
-  $("openMemo").addEventListener("click", function () { renderMemos(); $("handoffState").textContent = ""; $("memoSheet").showModal(); });
+  $("openRecords").addEventListener("click", function () { renderRecords(); $("handoffState").textContent = ""; $("recordsSheet").showModal(); });
   $("openSettings").addEventListener("click", function () { renderSettings(); $("settingsSheet").showModal(); });
-  document.querySelectorAll(".seg-ctl button").forEach(function (b) {
-    b.addEventListener("click", function () {
-      pause(); buildPlaylist(b.dataset.filter);
-      if (view === "card") renderCard(); else renderDial();
-      renderList();
-    });
-  });
+  $("settingsSheet").addEventListener("close", renderHome);
+  $("handoffBtn").addEventListener("click", function () { copyText(promptForHandoff(), $("handoffState"), "コピーしました。Claude のチャットに貼り付けてください。"); });
 
-  // メモ
-  $("memoSave").addEventListener("click", function () {
-    var v = $("memoText").value.trim();
-    if (v) addMemo(v);
-    $("memoInput").close();
-  });
-  $("memoInput").addEventListener("close", function () { // 残しても、やめても、あいづち待ちに戻る
-    if (view === "card") go(function (tok) { setPlaying(true); return replyStep(tok); });
-  });
-  function handoff(stateEl) { copyText(promptForHandoff(), stateEl, "コピーしました。Claude などのチャットに貼り付けてください。"); }
-  $("handoffBtn").addEventListener("click", function () { handoff($("handoffState")); });
-  el.outroHandoff.addEventListener("click", function () { renderMemos(); $("memoSheet").showModal(); handoff($("handoffState")); });
-  el.againLost.addEventListener("click", function () { TTS.unlock(); buildPlaylist("lost"); go(function (tok) { return playCard(tok, "top"); }); });
-  $("againAll").addEventListener("click", function () { TTS.unlock(); buildPlaylist("all"); go(function (tok) { return playCard(tok, "top"); }); });
-
-  // 設定
   $("saveKey").addEventListener("click", function () {
     var v = $("appkey").value.trim();
     try { if (v) localStorage.setItem(LS.key, v); else { localStorage.removeItem(LS.key); localStorage.removeItem(LS.oldKey); } } catch (e) {}
-    $("keyState").className = "hint good"; $("keyState").textContent = v ? "キーを保存しました。「声で返す」を入にすると使えます。" : "キーを消しました。";
-    renderVoiceBtn();
+    $("keyState").className = "hint good"; $("keyState").textContent = v ? "キーを保存しました。" : "キーを消しました。";
   });
   $("testMic").addEventListener("click", async function () {
     var st = $("keyState");
-    if (!ASR.ready()) { st.className = "hint bad"; st.textContent = "先に APPKEY を保存してください。"; return; }
-    pause();
-    st.className = "hint"; st.textContent = "接続中…";
-    var r = await ASR.listen({ ms: 7000, words: profileWords(deck.terms, wordCap), onLive: function () { st.textContent = "どうぞ。「なるほど」や用語を言ってみてください。"; } });
+    if (!engineName()) { st.className = "hint bad"; st.textContent = "声の聞き取りが使えません。APPKEY を保存してください。"; return; }
+    st.className = "hint"; st.textContent = "つないでいます…";
+    var c = deck.cards[0];
+    var r = await Listener.run({ words: wordsFor(c), maxMs: 12000, noSpeechMs: 7000,
+      onLive: function () { st.textContent = "どうぞ。「EventBridge で拾って Lambda から Slack へ」と言ってみてください。"; },
+      onText: function (t) { st.textContent = "聞き取り中：" + t; } });
     if (r.error) { st.className = "hint bad"; st.textContent = r.error; return; }
-    if (!r.text) {
-      st.className = "hint bad";
-      st.textContent = (r.spoke ? "声は検出しましたが、文字になりませんでした。" : "マイクに声が入っていません。ほかのアプリがマイクを使っていないか、端末のマイク許可を確認してください。")
-        + "（接続:" + (r.live ? "OK" : "未完了") + "／登録語:" + r.words + "）";
-      return;
-    }
-    var act = detectIntent(r), term = findLookup(r);
-    if (term) act = "「" + term.w + "」を引く";
-    renderSettings(); // 使った時間の表示を更新
+    if (!r.text) { st.className = "hint bad"; st.textContent = r.spoke ? "声は届きましたが、文字になりませんでした。" : "マイクに声が入っていません。ほかのアプリがマイクを使っていないか確認してください。"; return; }
+    var h = hitKeys(c.keys, r.text, r.reading);
     st.className = "hint good";
-    st.textContent = "聞き取り：「" + r.text + "」／読み：" + (r.reading || "–") + "／信頼度 " + (r.conf >= 0 ? r.conf.toFixed(2) : "–") + (act ? "／判定：" + act : "／あいづちでも用語でもない");
+    st.textContent = "聞き取り（" + (engineName() === "amivoice" ? "AmiVoice" : "ブラウザ標準") + "）：「" + r.text + "」　入っていた言葉：" + (c.keys.filter(function (_, i) { return h[i]; }).map(function (k) { return k.w; }).join("、") || "なし");
   });
-  $("optEcho").addEventListener("change", function (e) { settings.echo = e.target.checked; saveSettings(); });
+  $("optEngine").addEventListener("change", function (e) { settings.engine = e.target.value; saveSettings(); });
   $("optNolog").addEventListener("change", function (e) { settings.nolog = e.target.checked; saveSettings(); });
-  $("optTrap").addEventListener("change", function (e) { settings.trap = e.target.checked; saveSettings(); });
-  $("optWait").addEventListener("change", function (e) { settings.wait = Number(e.target.value); saveSettings(); });
+  $("optSize").addEventListener("change", function (e) { settings.size = Number(e.target.value); saveSettings(); });
+  $("optQuiet").addEventListener("change", function (e) { settings.quiet = Number(e.target.value); saveSettings(); });
   $("deckFile").addEventListener("change", function (e) {
-    var f = e.target.files[0]; if (!f) return;
-    var st = $("deckState");
+    var f = e.target.files[0]; if (!f) return; var st = $("deckState");
     f.text().then(function (txt) {
-      var d = normalizeDeck(JSON.parse(txt));
-      lsSet(LS.deck, d); pause(); settings.lastId = ""; setDeck(d); renderIntro(); renderSettings();
+      var m = txt.match(/```(?:json)?\s*([\s\S]*?)```/); if (m) txt = m[1];
+      var d = normalizeDeck(JSON.parse(txt)); d.audio = "";
+      lsSet(LS.deck, d); setDeck(d); renderSettings();
       st.className = "hint good"; st.textContent = "読み込みました：" + d.title + "（" + d.cards.length + "枚）";
-    }).catch(function (err) {
-      st.className = "hint bad";
-      st.textContent = err instanceof SyntaxError ? "JSON として読めませんでした。ファイルの中身を確認してください。" : err.message;
-    });
+    }).catch(function (err) { st.className = "hint bad"; st.textContent = err instanceof SyntaxError ? "JSON として読めませんでした。" : err.message; });
     e.target.value = "";
   });
   $("deckReset").addEventListener("click", function () {
     try { localStorage.removeItem(LS.deck); } catch (e) {}
-    pause(); settings.lastId = "";
-    loadSample().then(function () { renderIntro(); renderSettings(); $("deckState").className = "hint good"; $("deckState").textContent = "サンプルに戻しました。"; });
+    loadSample().then(function () { renderSettings(); $("deckState").className = "hint good"; $("deckState").textContent = "サンプルに戻しました。"; });
   });
-  $("copyPrompt").addEventListener("click", function () { copyText(promptForDeck(), $("promptState"), "コピーしました。ノートを貼り足して AI に渡し、返ってきた JSON を保存して読み込みます。"); });
-  $("resetStats").addEventListener("click", function () {
-    pause(); stats = {}; saveStats(); weak = {}; lsSet(LS.terms + deck.id, weak); buildPlaylist("all"); renderIntro(); renderSettings();
-    $("deckState").className = "hint good"; $("deckState").textContent = "聞いた記録を消しました。";
+  $("copyPrompt").addEventListener("click", function () { copyText(promptForDeck(), $("promptState"), "コピーしました。ノートを貼り足して Claude に渡し、返ってきた JSON をファイルに保存して読み込みます。"); });
+  var armed = 0;
+  $("resetProgress").addEventListener("click", function () {
+    var b = this;
+    if (Date.now() - armed < 4000) {
+      progress = {}; saveProgress(); lsSet(LS.log, lsGet(LS.log, []).filter(function (x) { return x.deck !== deck.id; }));
+      armed = 0; b.textContent = "記録を消す"; $("deckState").className = "hint good"; $("deckState").textContent = "記録を消しました。"; return;
+    }
+    armed = Date.now(); b.textContent = "もう一度押すと消えます";
+    setTimeout(function () { if (armed) { armed = 0; b.textContent = "記録を消す"; } }, 4000);
   });
-
-  // 画面を閉じたら止める（裏では読み上げが続かないため）
-  document.addEventListener("visibilitychange", function () { if (document.hidden && playing) pause(); });
+  document.addEventListener("visibilitychange", function () {
+    if (document.hidden && !$("session").hidden && !paused && mode === "talk") pauseSet();
+  });
 }
 function loadSample() {
-  return fetch("deck-sample.json").then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); }).then(function (j) { setDeck(normalizeDeck(j)); });
+  return fetch("deck-sample.json").then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+    .then(function (j) { setDeck(normalizeDeck(j)); });
 }
 function boot() {
   bind();
-  var custom = lsGet(LS.deck, null);
-  var ready;
+  var custom = lsGet(LS.deck, null), ready;
   try { if (custom) { setDeck(normalizeDeck(custom)); ready = Promise.resolve(); } } catch (e) { custom = null; }
   if (!custom) ready = loadSample();
-  ready.then(function () {
-    renderVoiceBtn(); renderMemoCount(); renderIntro();
-    if (settings.lastId && stats[settings.lastId]) setStatus("idle", "再生を押すと、前回の続きから始まります");
-  }).catch(function () {
-    setStatus("error", "教材を読み込めませんでした。https か localhost で開いているか確認してください。");
-  });
+  ready.then(renderHome).catch(function () { $("engineNote").textContent = "教材を読み込めませんでした。https か localhost で開いてください。"; });
 }
-// テストから中身を触るための出入口
-window.AIZUCHI = { findLookup: function (r) { var t = findLookup(r); return t ? t.w : ""; }, detectIntent: detectIntent, normalizeDeck: normalizeDeck, forSpeech: function (t) { return forSpeech(t); }, profileWords: function (t) { return profileWords(termsIn(t)); }, termsIn: function (t) { return termsIn(t); } };
+window.OSHIETE = { hitKeys: hitKeys, isPass: isPass, normalizeDeck: normalizeDeck, deck: function () { return deck; } };
 if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot); else boot();
 })();
