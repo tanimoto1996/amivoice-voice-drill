@@ -24,10 +24,10 @@ function lsRaw(k) { try { return localStorage.getItem(k) || ""; } catch (e) { re
 
 var storedSettings = lsGet(LS.settings, {});
 var settings = Object.assign(
-  { voice: false, echo: true, nolog: false, wait: 6, trap: true, rate: 1.0, filter: "all", lastId: "", v: 2 },
+  { voice: false, echo: false, nolog: false, wait: 6, trap: true, rate: 1.0, filter: "all", lastId: "", v: 3 },
   storedSettings
 );
-if ((storedSettings.v || 1) < 2) { settings.echo = true; settings.v = 2; } // 2版から「要点を声に出す」を標準に
+if ((storedSettings.v || 1) < 3) { settings.echo = false; settings.v = 3; } // 3版から、声に出すのは「ぼやく」が中心。言い返しは任意
 function saveSettings() { lsSet(LS.settings, settings); }
 function appkey() { return lsRaw(LS.key) || lsRaw(LS.oldKey); }
 
@@ -261,19 +261,26 @@ var ASR = (function () {
     if (window.AIZUCHI_MOCK_ASR) return window.AIZUCHI_MOCK_ASR(opts);
     return idle.then(function () {
       return new Promise(function (resolve) {
-        var done = false, live = false, speaking = false, spoke = false, finals = [], timer = null, tail = null;
+        var done = false, live = false, speaking = false, spoke = false, stopping = false, finals = [], timer = null, tail = null, cap = null;
         function finish(extra) {
           if (done) return;
           done = true; cur = null;
-          clearTimeout(timer); clearTimeout(tail);
+          clearTimeout(timer); clearTimeout(tail); clearTimeout(cap);
           try { Wrp.feedDataPause(); } catch (e) {}
           var out = { text: "", reading: "", conf: -1, live: live, spoke: spoke, words: opts.words ? opts.words.split("|").length : 0 };
           if (finals.length) {
-            out.text = finals.map(function (f) { return f.text; }).join("");
+            out.text = finals.map(function (f) { return f.text; }).join(opts.memo ? "\n" : "");
             out.reading = finals.map(function (f) { return f.reading; }).join("");
             out.conf = Math.min.apply(null, finals.map(function (f) { return f.conf; }));
           }
           resolve(Object.assign(out, extra || {}));
+        }
+        // 送信を止め、残りの結果を受け取ってから終わる（自分で止めたとき・上限に達したとき）
+        function graceful() {
+          if (done || stopping) return;
+          stopping = true; clearTimeout(timer); clearTimeout(tail); clearTimeout(cap);
+          try { Wrp.feedDataPause(); } catch (e) {}
+          setTimeout(function () { finish(); }, 5000);
         }
         function onTimeout() {
           if (speaking) { timer = setTimeout(function () { finish({ timedOut: !finals.length }); }, 4000); return; } // 話している途中なら結果を待つ
@@ -281,11 +288,13 @@ var ASR = (function () {
         }
         var me = cur = {
           cancel: function () { finish({ cancelled: true }); },
+          stop: graceful,
           onLive: function () {
             if (live) return; live = true;
             beep(880, 90);
             if (opts.onLive) opts.onLive();
             timer = setTimeout(onTimeout, opts.ms);
+            if (opts.max) cap = setTimeout(graceful, opts.max);
           },
           onSpeech: function (on) { speaking = on; if (on) { spoke = true; clearTimeout(tail); } },
           onPartial: opts.onPartial,
@@ -293,11 +302,15 @@ var ASR = (function () {
             if (!r.text) return;
             finals.push(r); addUsage(r.ms);
             if (!opts.memo) { finish(); return; }
+            clearTimeout(timer); // 話しはじめたら、最初の待ち時間は使わない
+            if (opts.onSeg) opts.onSeg(finals.map(function (f) { return f.text; }).join("\n"));
+            if (stopping) return;
             clearTimeout(tail);
-            tail = setTimeout(function () { finish(); }, 2500); // メモは 2.5 秒黙ったら終わり
+            tail = setTimeout(function () { finish(); }, opts.tail || 2500); // 黙ったら終わり
           },
           onError: function (msg) {
             if (done) return;
+            if (stopping) { finish(); return; } // 自分で止めたあとの切断は正常
             if (!live && opts.words && !opts.retried) { // 単語登録が原因で始められないときは、登録なしでやり直す
               done = true; cur = null; clearTimeout(timer);
               wordCap = 27;
@@ -315,7 +328,7 @@ var ASR = (function () {
         Wrp.profileWords = opts.words || "";
         Wrp.resultUpdatedInterval = "400";
         Wrp.keepFillerToken = "";
-        if (window.Recorder) Recorder.maxRecordingTime = 60000;
+        if (window.Recorder) Recorder.maxRecordingTime = opts.max ? opts.max + 10000 : 60000;
         var started = false;
         try { started = Wrp.feedDataResume(); } catch (e) { lastError = String(e); }
         if (!started) { if (idleDone) { idleDone(); idleDone = null; } finish({ error: friendly(lastError) }); return; }
@@ -327,6 +340,7 @@ var ASR = (function () {
   return {
     listen: listen,
     cancel: function () { if (cur) cur.cancel(); },
+    stop: function () { if (window.AIZUCHI_MOCK_STOP) return window.AIZUCHI_MOCK_STOP(); if (cur) cur.stop(); },
     ready: function () { return !!(window.AIZUCHI_MOCK_ASR || (window.Wrp && appkey() && navigator.mediaDevices)); }
   };
 })();
@@ -338,7 +352,7 @@ var INTENTS = [
   { act: "ok",    words: ["なるほど", "わかった", "わかりました", "分かった", "分かりました", "おっけー", "おーけー", "ok", "りょうかい", "了解", "つぎへ", "次へ", "つぎいって", "つぎにいって"], exact: ["つぎ", "次", "はい", "うん"] },
   { act: "again", words: ["もういっかい", "もういちど", "もっかい", "もう一回", "もう1回", "もう一度", "くりかえし", "りぴーと", "ききなおし"], exact: [] },
   { act: "lost",  words: ["わからん", "わからない", "わかりません", "わかんない", "分からん", "分からない", "分かりません", "分かんない", "どういうこと", "むずかしい", "難しい", "むずい", "ぴんとこない"], exact: ["なんで"] },
-  { act: "memo",  words: ["めもして", "めもする", "しつもん", "質問", "めもをとって"], exact: ["めも"] },
+  { act: "memo",  words: ["ぼやく", "ぼやき", "ぼやいて", "めもして", "めもする", "しつもん", "質問", "めもをとって"], exact: ["めも"] },
   { act: "stop",  words: ["すとっぷ", "とめて", "止めて", "いちじていし", "一時停止", "きゅうけい", "休憩"], exact: ["ていし", "停止"] },
   { act: "back",  words: ["ひとつまえ", "一つ前", "1つ前", "まえにもどって", "もどって", "戻って"], exact: ["まえ", "前", "もどる", "戻る"] }
 ];
@@ -427,10 +441,41 @@ function renderCard() {
   el.easyBox.hidden = true; fillSeg(el.segEasy, c.easy);
   el.echoBox.hidden = true;
   el.lookupBox.hidden = true;
+  renderBoyaki();
   el.card.classList.remove("dim");
   settings.lastId = c.id; saveSettings();
   show("card");
   window.scrollTo(0, 0);
+}
+// 文字になったぼやきから、教材の用語を拾う（英字の表記、またはカタカナの読み）
+function termsSaid(text) {
+  var raw = String(text || "").normalize("NFKC"), t = norm(text);
+  return deck.terms.filter(function (x) {
+    var nw = norm(x.w);
+    return (nw.length >= 2 && t.indexOf(nw) >= 0) || (x.r.length >= 3 && raw.indexOf(toKata(x.r)) >= 0);
+  }).map(function (x) { return x.w; });
+}
+function memosOf(c) { return loadMemos().filter(function (m) { return m.deck === deck.id && m.card === c.id; }); }
+// いまの1枚のぼやきと、要点の用語を言えたかどうか
+function renderBoyaki(liveText) {
+  var c = currentCard(), mine = memosOf(c);
+  var show = mine.length > 0 || liveText !== undefined;
+  el.boyakiBox.hidden = !show;
+  if (!show) return;
+  var said = {};
+  mine.forEach(function (m) { (m.terms || termsSaid(m.text)).forEach(function (w) { said[w] = true; }); });
+  if (liveText) termsSaid(liveText).forEach(function (w) { said[w] = true; });
+  el.boyakiChips.textContent = "";
+  termsIn(c.point + " " + c.why).forEach(function (t) {
+    var s = document.createElement("span"); s.className = "chip" + (said[t.w] ? " hit" : ""); s.textContent = t.w; el.boyakiChips.appendChild(s);
+  });
+  el.boyakiList.textContent = "";
+  if (liveText !== undefined) {
+    var li0 = document.createElement("li"); li0.className = "by-live"; li0.textContent = liveText || "…"; el.boyakiList.appendChild(li0);
+  }
+  mine.slice().reverse().slice(0, 3).forEach(function (m) {
+    var li = document.createElement("li"); li.textContent = m.text; el.boyakiList.appendChild(li);
+  });
 }
 function renderIntro() {
   el.introDeck.textContent = "いまの教材：" + deck.title + "（" + deck.cards.length + "枚）";
@@ -456,7 +501,7 @@ function flash(act) {
 // ---------------------------------------------------------------- 再生の流れ
 var playing = false, wake = null, runId = 0, part = "top";
 function alive(tok) { return tok === runId; }
-function halt() { runId++; TTS.cancel(); ASR.cancel(); }
+function halt() { runId++; TTS.cancel(); ASR.cancel(); if (boyaking) setBoyaking(false); }
 function go(fn) {
   halt();
   var tok = runId;
@@ -620,7 +665,7 @@ function doAct(act) {
     if (c.easy) go(function (tok) { return playCard(tok, "easy"); });
     else go(async function (tok) { setPlaying(true); setStatus("speaking", "読み上げ中"); await TTS.say("あとでもう一度流します。"); if (alive(tok)) advance(1); });
   }
-  else if (act === "memo") { go(memoStep); }
+  else if (act === "memo") { if (boyaking) ASR.stop(); else go(memoStep); }
   else if (act === "stop") { pause(); }
   else if (act === "back") { advance(-1); }
 }
@@ -634,33 +679,48 @@ function loadMemos() { return lsGet(LS.memos, []); }
 function addMemo(text) {
   var c = currentCard();
   var list = loadMemos();
-  list.push({ deck: deck.id, card: c.id, of: c.point, text: text, t: Date.now() });
-  lsSet(LS.memos, list); renderMemoCount();
+  list.push({ deck: deck.id, card: c.id, of: c.point, text: text, terms: termsSaid(text), t: Date.now() });
+  lsSet(LS.memos, list); renderMemoCount(); renderBoyaki();
 }
 function renderMemoCount() {
   var n = loadMemos().length;
   el.memoCount.hidden = !n; el.memoCount.textContent = n;
 }
+var boyaking = false;
+function setBoyaking(on) {
+  boyaking = on;
+  var b = el.replies.querySelector('[data-act="memo"]');
+  b.classList.toggle("rec", on);
+  b.querySelector(".say").textContent = on ? "止める" : "ぼやく";
+  b.querySelector(".does").textContent = on ? "ぼやきを保存する" : "自分の言葉で言う";
+}
+// いまの1枚について、自分の言葉でぼやく。黙るか「止める」で保存し、あいづち待ちに戻る。
 async function memoStep(tok) {
-  if (!voiceOn()) { // 声が使えないときは手入力
-    setPlaying(false); setStatus("idle", "メモを入力中");
+  if (!ASR.ready()) { // APPKEY が無いときは手で書く
+    setPlaying(false); setStatus("idle", "ぼやきを入力中");
     $("memoText").value = ""; $("memoInput").showModal(); $("memoText").focus();
     return;
   }
-  var c = currentCard();
   setPlaying(true);
-  setStatus("speaking", "読み上げ中");
-  await TTS.say("メモをどうぞ。"); if (!alive(tok)) return;
-  setStatus("memo", "メモを聞いています");
-  var words = wordsForReply(); // この1枚の用語を先頭に、教材の用語を登録
-  var r = await ASR.listen({ ms: 10000, memo: true, words: words, onPartial: function (p) { el.heard.textContent = p.text; } });
-  if (!alive(tok)) return;
-  if (r.error) { voiceFailed(r.error); setPlaying(false); return; }
+  setStatus("memo", "つないでいます");
+  renderBoyaki("");
+  el.boyakiBox.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  setBoyaking(true);
+  var r = await ASR.listen({
+    ms: 15000, memo: true, tail: 6000, max: 180000, words: wordsForReply(),
+    onLive: function () { if (alive(tok)) setStatus("memo", "この1枚についてどうぞ", "黙ると保存します"); },
+    onPartial: function (p) { if (alive(tok)) el.heard.textContent = p.text; },
+    onSeg: function (text) { if (alive(tok)) { renderBoyaki(text); el.heard.textContent = ""; } }
+  });
+  setBoyaking(false);
+  if (!alive(tok)) { renderBoyaki(); return; }
+  if (r.error) { renderBoyaki(); setStatus("error", r.error); setPlaying(false); return; }
   if (r.text) {
     addMemo(r.text);
-    setStatus("speaking", "メモしました", "「" + r.text + "」");
-    await TTS.say("メモしました。");
+    setStatus("speaking", "ぼやきを保存しました");
+    await TTS.say("保存しました。");
   } else {
+    renderBoyaki();
     setStatus("speaking", "読み上げ中");
     await TTS.say("聞き取れませんでした。");
   }
@@ -700,22 +760,23 @@ function promptForDeck() {
   return "次のノートを、音声で聞く資格勉強用の教材に書き直してください。\n\n" + FORMAT_NOTE + "\n\n--- ここからノート ---\n（ここにノートや問題集のメモを貼る）";
 }
 function promptForHandoff() {
-  var lost = deck.cards.filter(function (_, i) { return statusOf(i) === "lost"; });
-  var memos = loadMemos();
-  var out = ["資格勉強の音声教材を聞いて、理解できなかったところと、途中で浮かんだ疑問です。", ""];
-  if (lost.length) {
-    out.push("■ わからなかったカード");
-    lost.forEach(function (c) { out.push("- 場面: " + c.scene + "\n  要点: " + c.point + "\n  解説: " + c.why); });
+  var memos = loadMemos().filter(function (m) { return m.deck === deck.id; });
+  var byCard = {};
+  memos.forEach(function (m) { (byCard[m.card] = byCard[m.card] || []).push(m.text); });
+  var out = ["資格勉強の音声教材を1枚ずつ聞いて、そのカードについて自分の言葉で声に出した「ぼやき」です。音声認識の結果そのままなので、言い間違いや誤字が混じっています。", ""];
+  deck.cards.forEach(function (c, i) {
+    var mine = byCard[c.id], lost = statusOf(i) === "lost";
+    if (!mine && !lost) return;
+    out.push("■ カード: " + c.point + (lost ? "（聞いて「わからん」と答えた）" : ""));
+    out.push("  場面: " + c.scene);
+    out.push("  解説: " + c.why);
+    if (c.trap) out.push("  ひっかけ: " + c.trap);
+    (mine || []).forEach(function (t) { out.push("  ぼやき: 「" + t.replace(/\n/g, " ") + "」"); });
     out.push("");
-  }
-  if (memos.length) {
-    out.push("■ 聞きながら声で残したメモ（音声認識の結果そのままなので、誤字があるかもしれません）");
-    memos.forEach(function (m) { out.push("- 「" + m.text + "」（カードの要点: " + m.of + "）"); });
-    out.push("");
-  }
+  });
   out.push("お願い:");
-  out.push("1. メモの疑問にそれぞれ短く答えてください。");
-  out.push("2. わからなかったカードごとに、別の角度から説明し直した補足カードを作ってください。前提知識が足りていなさそうなら、その前提を説明するカードも足してください。");
+  out.push("1. カードごとに、ぼやきをカードの内容と照らして、間違っている所とあやふやな所を指摘してください。疑問が含まれていれば答えてください。合っている所は一言で構いません。");
+  out.push("2. 間違いやあやふやがあったカードと、「わからん」のカードについて、別の角度から説明し直した補足カードを作ってください。前提知識が足りていなさそうなら、その前提を説明するカードも足してください。");
   out.push("");
   out.push(FORMAT_NOTE);
   return out.join("\n");
@@ -747,6 +808,8 @@ function renderList() {
     if (view === "card" && playlist[pos] === i) b.className = "now"; else if (!inList) b.className = "off";
     var m = document.createElement("span"); m.className = "mark " + statusOf(i);
     var t = document.createElement("span"); t.textContent = c.point;
+    var nb = memosOf(c).length;
+    if (nb) { var by = document.createElement("span"); by.className = "by-count"; by.textContent = "　ぼやき " + nb; t.appendChild(by); }
     b.appendChild(m); b.appendChild(t);
     b.addEventListener("click", function () {
       if (playlist.indexOf(i) < 0) buildPlaylist("all");
@@ -791,7 +854,7 @@ async function enableVoice() {
 function bind() {
   ["status", "statusText", "heard", "dial", "okCount", "lostCount", "posLabel", "intro", "introDeck", "card", "outro", "outroLead", "outroSub",
    "againLost", "outroHandoff", "replies", "playBtn", "voiceBtn", "rateBtn", "segScene", "segPoint", "segWhy", "segTrap", "segEasy",
-   "trapBox", "easyBox", "echoBox", "echoChips", "lookupBox", "lookupTerm", "segLookup", "memoCount", "memoList"].forEach(function (id) { el[id] = $(id); });
+   "trapBox", "easyBox", "echoBox", "echoChips", "lookupBox", "lookupTerm", "segLookup", "boyakiBox", "boyakiChips", "boyakiList", "memoCount", "memoList"].forEach(function (id) { el[id] = $(id); });
 
   el.playBtn.addEventListener("click", function () {
     if (playing) { pause(); return; }
