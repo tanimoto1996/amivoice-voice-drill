@@ -12,6 +12,7 @@ var LS = {
   settings: "aizuchi.settings",
   deck: "aizuchi.deck",
   stats: "aizuchi.stats.",
+  terms: "aizuchi.terms.",
   memos: "aizuchi.memos",
   usage: "aizuchi.usage"
 };
@@ -21,10 +22,12 @@ function lsGet(k, fallback) {
 function lsSet(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
 function lsRaw(k) { try { return localStorage.getItem(k) || ""; } catch (e) { return ""; } }
 
+var storedSettings = lsGet(LS.settings, {});
 var settings = Object.assign(
-  { voice: false, echo: false, nolog: false, wait: 6, trap: true, rate: 1.0, filter: "all", lastId: "" },
-  lsGet(LS.settings, {})
+  { voice: false, echo: true, nolog: false, wait: 6, trap: true, rate: 1.0, filter: "all", lastId: "", v: 2 },
+  storedSettings
 );
+if ((storedSettings.v || 1) < 2) { settings.echo = true; settings.v = 2; } // 2版から「要点を声に出す」を標準に
 function saveSettings() { lsSet(LS.settings, settings); }
 function appkey() { return lsRaw(LS.key) || lsRaw(LS.oldKey); }
 
@@ -43,6 +46,7 @@ function sentences(text) { return (String(text || "").match(/[^。！？]+[。�
 // ---------------------------------------------------------------- 教材
 var deck = null;      // { id, title, terms:[{w,r}], cards:[{id,scene,point,why,trap,easy}] }
 var stats = {};       // cardId -> { n, last: "heard"|"ok"|"lost" }
+var weak = {};        // 用語の表記 -> "miss"（言い返しで抜けた）| "asked"（声で引いた）
 var playlist = [];    // カードの index の並び（「わからん」は少し先に差し込まれる）
 var pos = 0;
 
@@ -84,7 +88,7 @@ function normalizeDeck(json) {
     };
   });
   if (!d.cards.length) throw new Error("読み上げられるカードが1枚もありません。point と why を持つカードが必要です。");
-  d.terms = d.terms.filter(function (t) { return t && t.w && t.r; }).map(function (t) { return { w: String(t.w), r: toHira(String(t.r)) }; });
+  d.terms = d.terms.filter(function (t) { return t && t.w && t.r; }).map(function (t) { return { w: String(t.w), r: toHira(String(t.r)), d: String(t.d || "") }; });
   d.terms.sort(function (a, b) { return b.w.length - a.w.length; }); // 長い用語から当てる（GitHub を Git より先に）
   if (!d.id) d.id = "deck-" + d.cards.length + "-" + norm(d.title).slice(0, 24);
   return d;
@@ -92,15 +96,20 @@ function normalizeDeck(json) {
 function setDeck(d) {
   deck = d;
   stats = lsGet(LS.stats + deck.id, {});
+  weak = lsGet(LS.terms + deck.id, {});
   buildPlaylist(settings.filter, settings.lastId);
 }
 function saveStats() { lsSet(LS.stats + deck.id, stats); }
+function setWeak(w, v) { if (v) weak[w] = v; else delete weak[w]; lsSet(LS.terms + deck.id, weak); }
+function cardText(c) { return [c.scene, c.point, c.why, c.trap].join(" "); }
+function hasWeakTerm(i) { return termsIn(cardText(deck.cards[i])).some(function (t) { return weak[t.w]; }); }
 function statusOf(i) { var s = stats[deck.cards[i].id]; return s ? s.last : "new"; }
 function buildPlaylist(filter, startId) {
   var all = deck.cards.map(function (_, i) { return i; });
   var list = all;
   if (filter === "new") list = all.filter(function (i) { return statusOf(i) === "new"; });
   if (filter === "lost") list = all.filter(function (i) { return statusOf(i) === "lost"; });
+  if (filter === "weak") list = all.filter(hasWeakTerm);
   if (!list.length) { list = all; filter = "all"; }
   settings.filter = filter;
   playlist = list;
@@ -132,13 +141,20 @@ function forSpeech(text) {
   return out;
 }
 // profileWords（そのセッションだけ有効な単語登録）: 「表記 読み」を | で連結
-function profileWords(terms) {
+var wordCap = 100; // 一度に登録する語数。多すぎて始められなかったら 27 語に絞る
+function profileWords(terms, cap) {
   return terms.map(function (t) {
     var w = t.w.replace(/ /g, "_");
     if (!/^[A-Za-z0-9_぀-ヿ一-鿿]+$/.test(w)) return "";
     if (!/^[ぁ-ゖー]+$/.test(t.r)) return "";
     return w + " " + t.r;
-  }).filter(Boolean).slice(0, 30).join("|");
+  }).filter(Boolean).slice(0, cap || 30).join("|");
+}
+// あいづち待ちで送る単語: いまの1枚の用語を先頭に、教材の用語をまとめて登録（声で引けるように）
+function wordsForReply() {
+  var mine = termsIn(cardText(currentCard()));
+  var rest = deck.terms.filter(function (t) { return mine.indexOf(t) < 0; });
+  return profileWords(mine.concat(rest), wordCap);
 }
 
 // ---------------------------------------------------------------- 読み上げ
@@ -284,6 +300,7 @@ var ASR = (function () {
             if (done) return;
             if (!live && opts.words && !opts.retried) { // 単語登録が原因で始められないときは、登録なしでやり直す
               done = true; cur = null; clearTimeout(timer);
+              wordCap = 27;
               resolve(listen(Object.assign({}, opts, { words: "", retried: true })));
               return;
             }
@@ -339,6 +356,34 @@ function detectIntent(r) {
   return best ? best.act : "";
 }
 
+// 声で引く: 「Canary って何」「Firehose のカード」、または用語だけを言うと、その用語を引く
+var LOOKUP_CUES = ["ってなに", "ってなん", "ってどういう", "とは", "のかーど", "おしえて", "なんだっけ", "について", "のせつめい", "のいみ", "がわから", "わすれた"];
+function findLookup(r) {
+  var reading = String(r.reading || "").replace(/[^ぁ-ゖー]/g, ""), text = norm(r.text);
+  if (!reading && !text) return null;
+  if ((reading || text).length > 30) return null; // 長い発話は対象外
+  var found = null;
+  deck.terms.some(function (t) {
+    var nw = norm(t.w), nr = norm(t.r);
+    var hit = (nw.length >= 2 && text.indexOf(nw) >= 0)      // 表記で一致（英字の用語）
+           || (nr.length >= 4 && text.indexOf(nr) >= 0)      // カタカナで返ってきた場合
+           || (t.r.length >= 5 && reading.indexOf(t.r) >= 0); // 読みで一致（短い読みは誤爆しやすいので使わない）
+    if (hit) found = t;
+    return hit;
+  });
+  if (!found) return null;
+  var cue = LOOKUP_CUES.some(function (c) { return reading.indexOf(c) >= 0 || text.indexOf(norm(c)) >= 0; });
+  var bare = reading ? reading.length <= found.r.length + 3 : text.length <= norm(found.w).length + 3;
+  return cue || bare ? found : null;
+}
+// その用語が要点に出てくる1枚（無ければ本文に出てくる1枚）
+function homeCard(term) {
+  var cur = currentCard();
+  function has(text) { return termsIn(text).indexOf(term) >= 0; }
+  var others = deck.cards.filter(function (c) { return c !== cur; });
+  return others.find(function (c) { return has(c.point); }) || (has(cardText(cur)) ? cur : null) || others.find(function (c) { return has(cardText(c)); }) || null;
+}
+
 // ---------------------------------------------------------------- 画面
 var el = {};
 function setStatus(state, text, heard) {
@@ -381,6 +426,7 @@ function renderCard() {
   el.trapBox.hidden = !c.trap; fillSeg(el.segTrap, c.trap);
   el.easyBox.hidden = true; fillSeg(el.segEasy, c.easy);
   el.echoBox.hidden = true;
+  el.lookupBox.hidden = true;
   el.card.classList.remove("dim");
   settings.lastId = c.id; saveSettings();
   show("card");
@@ -486,10 +532,30 @@ async function echoStep(tok, c) {
   targets.forEach(function (t, i) {
     var hit = said.indexOf(norm(t.w)) >= 0 || said.indexOf(t.r) >= 0 || reading.indexOf(t.r.replace(/ー/g, "")) >= 0 || reading.indexOf(t.r) >= 0;
     chips[i].classList.add(hit ? "hit" : "miss");
-    if (!hit) missed.push(t);
+    if (hit) { if (weak[t.w] === "miss") setWeak(t.w, null); } else { missed.push(t); setWeak(t.w, "miss"); }
   });
   setStatus("speaking", "読み上げ中", "「" + r.text + "」");
-  await TTS.say(missed.length ? missed.map(function (t) { return toKata(t.r); }).join("、") + "、が抜けました。" : "言えました。");
+  if (!missed.length) { await TTS.say("言えました。"); return; }
+  await TTS.say(missed.map(function (t) { return toKata(t.r); }).join("、") + "、が抜けました。要点をもう一度。"); if (!alive(tok)) return;
+  await TTS.say(c.point);
+}
+
+// 声で引いた用語を読む。終わったら、もとの1枚のあいづち待ちに戻る。
+async function lookupStep(tok, term, heard) {
+  var cur = currentCard(), home = homeCard(term);
+  setWeak(term.w, "asked");
+  var text = term.d;
+  if (home && home !== cur) text += (text ? "この用語が出てくる1枚の要点は、" : "") + home.point + (!term.d && home.easy ? home.easy : "");
+  else if (!text && home) text = home.easy || home.point;
+  el.lookupTerm.textContent = term.w;
+  fillSeg(el.segLookup, text || "この教材には、この用語の説明がありません。");
+  el.lookupBox.hidden = false;
+  el.lookupBox.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  setPlaying(true);
+  setStatus("speaking", "引いた用語を読み上げ中", heard ? "「" + heard + "」" : "");
+  await TTS.say(toKata(term.r) + "。"); if (!alive(tok)) return;
+  await speakSeg(el.segLookup, tok); if (!alive(tok)) return;
+  await replyStep(tok);
 }
 
 function voiceFailed(msg) {
@@ -501,14 +567,17 @@ async function replyStep(tok) {
   var waitMs = settings.wait > 0 ? settings.wait * 1000 : 0;
   if (voiceOn()) {
     for (var tries = 0; tries < 3; tries++) {
-      setStatus("listening", "あいづちをどうぞ");
-      var r = await ASR.listen({ ms: waitMs || 50000, onPartial: function (p) { el.heard.textContent = p.text; } });
+      setStatus("listening", "あいづちか、用語をどうぞ");
+      var r = await ASR.listen({ ms: waitMs || 50000, words: wordsForReply(), onPartial: function (p) { el.heard.textContent = p.text; } });
       if (!alive(tok)) return;
       if (r.error) { voiceFailed(r.error); setPlaying(false); return; } // 理由を読めるよう、ここで止める
       if (r.timedOut || !r.text) { if (waitMs) break; continue; }
-      var act = r.conf >= 0 && r.conf < CONF_MIN ? "" : detectIntent(r);
-      if (act) { setStatus("listening", "あいづちをどうぞ", "「" + r.text + "」"); return doAct(act); }
-      setStatus("listening", "もう一度どうぞ", "「" + r.text + "」は、あいづちとして聞き取れませんでした");
+      var sure = !(r.conf >= 0 && r.conf < CONF_MIN);
+      var term = sure ? findLookup(r) : null;
+      if (term) { var heard = r.text; return go(function (t2) { return lookupStep(t2, term, heard); }); }
+      var act = sure ? detectIntent(r) : "";
+      if (act) { setStatus("listening", "あいづちか、用語をどうぞ", "「" + r.text + "」"); return doAct(act); }
+      setStatus("listening", "もう一度どうぞ", "「" + r.text + "」は、あいづちにも用語にも当たりませんでした");
       await sleep(900); if (!alive(tok)) return;
     }
     if (!waitMs) { setStatus("waiting", "ボタンで返してください"); setPlaying(false); return; }
@@ -583,7 +652,7 @@ async function memoStep(tok) {
   setStatus("speaking", "読み上げ中");
   await TTS.say("メモをどうぞ。"); if (!alive(tok)) return;
   setStatus("memo", "メモを聞いています");
-  var words = profileWords(termsIn([c.scene, c.point, c.why, c.trap].join(" "))); // この1枚に出てくる用語だけ登録
+  var words = wordsForReply(); // この1枚の用語を先頭に、教材の用語を登録
   var r = await ASR.listen({ ms: 10000, memo: true, words: words, onPartial: function (p) { el.heard.textContent = p.text; } });
   if (!alive(tok)) return;
   if (r.error) { voiceFailed(r.error); setPlaying(false); return; }
@@ -616,7 +685,7 @@ function renderMemos() {
 // ---------------------------------------------------------------- 生成 AI への受け渡し（コピーして貼るだけ。API キー不要）
 var FORMAT_NOTE = [
   "出力は次の JSON だけにしてください。",
-  '{ "title": "教材名", "terms": [{"w": "EventBridge", "r": "いべんとぶりっじ"}], "cards": [{"id": "c01", "scene": "", "point": "", "why": "", "trap": "", "easy": ""}] }',
+  '{ "title": "教材名", "terms": [{"w": "EventBridge", "r": "いべんとぶりっじ", "d": "イベントを受け取って次の処理へ渡す中継役です。"}], "cards": [{"id": "c01", "scene": "", "point": "", "why": "", "trap": "", "easy": ""}] }',
   "",
   "書き方のルール（目ではなく耳で聞く教材です）:",
   "- scene: どんな場面・要件の話か。1〜2文。",
@@ -625,7 +694,7 @@ var FORMAT_NOTE = [
   "- trap: 試験で間違えやすい選択肢と、外れる理由。2〜3文。無ければ空文字。",
   "- easy: 専門用語を減らした、たとえ話による言い換え。2〜3文。",
   "- 矢印、プラス、イコール、括弧、箇条書きなどの記号は使わず、話し言葉の文にする。",
-  "- 英字の製品名や略語は本文では英字のまま書き、すべて terms に {表記 w, ひらがなの読み r} で登録する。"
+  "- 英字の製品名や略語は本文では英字のまま書き、すべて terms に {表記 w, ひらがなの読み r, 1文の短い説明 d} で登録する。"
 ].join("\n");
 function promptForDeck() {
   return "次のノートを、音声で聞く資格勉強用の教材に書き直してください。\n\n" + FORMAT_NOTE + "\n\n--- ここからノート ---\n（ここにノートや問題集のメモを貼る）";
@@ -667,6 +736,9 @@ function copyText(text, stateEl, okMsg) {
 function renderList() {
   $("deckTitle").textContent = deck.title;
   document.querySelectorAll(".seg-ctl button").forEach(function (b) { b.setAttribute("aria-pressed", b.dataset.filter === settings.filter ? "true" : "false"); });
+  var names = Object.keys(weak);
+  $("weakTerms").hidden = !names.length;
+  $("weakTerms").textContent = "言えていない・声で引いた用語：" + names.join("、");
   var ol = $("cardList"); ol.textContent = "";
   deck.cards.forEach(function (c, i) {
     var li = document.createElement("li");
@@ -719,7 +791,7 @@ async function enableVoice() {
 function bind() {
   ["status", "statusText", "heard", "dial", "okCount", "lostCount", "posLabel", "intro", "introDeck", "card", "outro", "outroLead", "outroSub",
    "againLost", "outroHandoff", "replies", "playBtn", "voiceBtn", "rateBtn", "segScene", "segPoint", "segWhy", "segTrap", "segEasy",
-   "trapBox", "easyBox", "echoBox", "echoChips", "memoCount", "memoList"].forEach(function (id) { el[id] = $(id); });
+   "trapBox", "easyBox", "echoBox", "echoChips", "lookupBox", "lookupTerm", "segLookup", "memoCount", "memoList"].forEach(function (id) { el[id] = $(id); });
 
   el.playBtn.addEventListener("click", function () {
     if (playing) { pause(); return; }
@@ -785,13 +857,14 @@ function bind() {
     if (!ASR.ready()) { st.className = "hint bad"; st.textContent = "先に APPKEY を保存してください。"; return; }
     pause();
     st.className = "hint"; st.textContent = "接続中…";
-    var r = await ASR.listen({ ms: 7000, words: profileWords(deck.terms), onLive: function () { st.textContent = "どうぞ。「なるほど」や用語を言ってみてください。"; } });
+    var r = await ASR.listen({ ms: 7000, words: profileWords(deck.terms, wordCap), onLive: function () { st.textContent = "どうぞ。「なるほど」や用語を言ってみてください。"; } });
     if (r.error) { st.className = "hint bad"; st.textContent = r.error; return; }
     if (!r.text) { st.textContent = "何も聞き取れませんでした。マイクに近づいてもう一度。"; return; }
-    var act = detectIntent(r);
+    var act = detectIntent(r), term = findLookup(r);
+    if (term) act = "「" + term.w + "」を引く";
     renderSettings(); // 使った時間の表示を更新
     st.className = "hint good";
-    st.textContent = "聞き取り：「" + r.text + "」／読み：" + (r.reading || "–") + "／信頼度 " + (r.conf >= 0 ? r.conf.toFixed(2) : "–") + (act ? "／あいづち：" + act : "／あいづちではない");
+    st.textContent = "聞き取り：「" + r.text + "」／読み：" + (r.reading || "–") + "／信頼度 " + (r.conf >= 0 ? r.conf.toFixed(2) : "–") + (act ? "／判定：" + act : "／あいづちでも用語でもない");
   });
   $("optEcho").addEventListener("change", function (e) { settings.echo = e.target.checked; saveSettings(); });
   $("optNolog").addEventListener("change", function (e) { settings.nolog = e.target.checked; saveSettings(); });
@@ -817,7 +890,7 @@ function bind() {
   });
   $("copyPrompt").addEventListener("click", function () { copyText(promptForDeck(), $("promptState"), "コピーしました。ノートを貼り足して AI に渡し、返ってきた JSON を保存して読み込みます。"); });
   $("resetStats").addEventListener("click", function () {
-    pause(); stats = {}; saveStats(); buildPlaylist("all"); renderIntro(); renderSettings();
+    pause(); stats = {}; saveStats(); weak = {}; lsSet(LS.terms + deck.id, weak); buildPlaylist("all"); renderIntro(); renderSettings();
     $("deckState").className = "hint good"; $("deckState").textContent = "聞いた記録を消しました。";
   });
 
@@ -841,6 +914,6 @@ function boot() {
   });
 }
 // テストから中身を触るための出入口
-window.AIZUCHI = { detectIntent: detectIntent, normalizeDeck: normalizeDeck, forSpeech: function (t) { return forSpeech(t); }, profileWords: function (t) { return profileWords(termsIn(t)); }, termsIn: function (t) { return termsIn(t); } };
+window.AIZUCHI = { findLookup: function (r) { var t = findLookup(r); return t ? t.w : ""; }, detectIntent: detectIntent, normalizeDeck: normalizeDeck, forSpeech: function (t) { return forSpeech(t); }, profileWords: function (t) { return profileWords(termsIn(t)); }, termsIn: function (t) { return termsIn(t); } };
 if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot); else boot();
 })();
