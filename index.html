@@ -40,8 +40,8 @@
       <p class="intro-lead">解説を耳で聞く。<br>返事は、あいづちだけ。</p>
       <ol class="intro-steps">
         <li>再生すると、1枚ずつ「場面 → 要点 → なぜ → ひっかけ」の順に読み上げます。</li>
-        <li>聞き終わったら「なるほど」か「わからん」。声でもボタンでも返せます。</li>
-        <li>「わからん」と返した1枚は、かみくだいた説明のあと、少し先でもう一度流れます。</li>
+        <li>聞き終わったら「なるほど」か「わからん」。声でもボタンでも返せます。「わからん」の1枚は、少し先でもう一度流れます。</li>
+        <li>声を入にすると、要点を言い返す時間が入ります。「Canary って何」のように用語を言えば、その説明を読み上げます。</li>
       </ol>
       <p class="intro-deck" id="introDeck"></p>
     </div>
@@ -58,6 +58,11 @@
       <div class="easy" id="easyBox" hidden>
         <span class="tag tag-easy">かみくだくと</span>
         <div class="seg" data-k="easy" id="segEasy"></div>
+      </div>
+      <div class="lookup" id="lookupBox" hidden>
+        <span class="tag tag-lookup">声で引いた</span>
+        <p class="lookup-term" id="lookupTerm"></p>
+        <div class="seg" data-k="lookup" id="segLookup"></div>
       </div>
       <div class="echo" id="echoBox" hidden>
         <span class="tag tag-echo">声に出す</span>
@@ -118,8 +123,10 @@
   <div class="seg-ctl" role="group" aria-label="流す範囲">
     <button type="button" data-filter="all" aria-pressed="true">全部</button>
     <button type="button" data-filter="new" aria-pressed="false">まだの分</button>
-    <button type="button" data-filter="lost" aria-pressed="false">わからんだけ</button>
+    <button type="button" data-filter="lost" aria-pressed="false">わからん</button>
+    <button type="button" data-filter="weak" aria-pressed="false">苦手な用語</button>
   </div>
+  <p class="sheet-note" id="weakTerms" hidden></p>
   <ol class="card-list" id="cardList"></ol>
 </dialog>
 
@@ -169,7 +176,7 @@
       <button type="button" class="btn" id="testMic">マイクを試す</button>
     </div>
     <p class="hint" id="keyState" role="status"></p>
-    <label class="check"><input type="checkbox" id="optEcho"><span><b>要点を声に出す</b><br>解説のあと、要点を復唱します。言えた用語が点灯します。</span></label>
+    <label class="check"><input type="checkbox" id="optEcho"><span><b>要点を声に出す</b><br>解説のあと、要点を言い返します。言えた用語が点灯し、抜けた用語は「苦手な用語」に残ります。</span></label>
     <label class="check"><input type="checkbox" id="optNolog"><span><b>音声をサーバーに残さない</b><br>ログ保存なしの接続先を使います（料金が変わります）。</span></label>
     <p class="hint" id="usage"></p>
   </section>

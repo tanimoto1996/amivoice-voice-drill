@@ -173,7 +173,9 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; }
 .seg .s.on { background: var(--amber-soft); box-shadow: 0 0 0 3px var(--amber-soft); }
 .card.dim .seg .s:not(.on):not(.done) { opacity: .6; }
 
-.trap, .easy, .echo { margin-top: 16px; padding-left: 12px; border-left: 3px solid var(--line); }
+.trap, .easy, .echo, .lookup { margin-top: 16px; padding-left: 12px; border-left: 3px solid var(--line); }
+.lookup { border-color: var(--amber); }
+.lookup-term { margin: 0 0 2px; font-family: var(--display); font-weight: 900; font-size: 19px; line-height: 1.4; }
 .trap { border-color: var(--lost); }
 .easy { border-color: var(--ok); }
 .echo { border-color: var(--memo); }
@@ -190,6 +192,7 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; }
 .tag-trap { background: var(--lost-soft); color: var(--lost); }
 .tag-easy { background: var(--ok-soft); color: var(--ok); }
 .tag-echo { background: var(--memo-soft); color: var(--memo); }
+.tag-lookup { background: var(--amber-soft); color: var(--ink); }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .chip {
   border: 1.5px dashed var(--line);
@@ -386,7 +389,8 @@ textarea { resize: vertical; line-height: 1.6; }
   background: none;
   font-family: var(--display);
   font-weight: 700;
-  font-size: 14px;
+  font-size: 13px;
+  padding: 0 4px;
 }
 .seg-ctl button + button { border-left: 1.5px solid var(--ink); }
 .seg-ctl button[aria-pressed="true"] { background: var(--ink); color: var(--paper); }
