@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#EDF0F3" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#10182A" media="(prefers-color-scheme: dark)">
+<title>ぼやきメモ</title>
+<meta name="description" content="勉強のあと、覚えたことを声でぼやく。専門用語ごと文字になって溜まるメモ帳です。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Zen+Maru+Gothic:wght@500;700;900&display=swap" rel="stylesheet">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2316223A'/%3E%3Cpath d='M7 22V14M12 22V10M17 22V6M22 22V12M27 22V16' stroke='%23E89B00' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="boyaki">
+<div class="app">
+
+  <header class="top">
+    <h1 class="brand">ぼやきメモ</h1>
+    <nav class="top-nav" aria-label="メニュー">
+      <a class="link-btn" href="./">聞く</a>
+      <button type="button" class="link-btn" id="openSettings">設定</button>
+    </nav>
+  </header>
+
+  <main class="stage">
+    <!-- 録る -->
+    <section class="rec" id="rec" data-state="idle">
+      <p class="rec-lead" id="recLead">勉強のあと、<br>声に出してぼやく。</p>
+      <div class="live" id="live" hidden aria-live="polite">
+        <p class="live-text" id="liveText"></p>
+        <p class="live-partial" id="livePartial"></p>
+      </div>
+      <button type="button" class="rec-btn" id="recBtn" aria-pressed="false">
+        <span class="rec-dot" aria-hidden="true"></span>
+        <span class="rec-label" id="recLabel">ぼやく</span>
+        <span class="rec-time" id="recTime"></span>
+      </button>
+      <p class="rec-note" id="recNote" role="status"></p>
+    </section>
+
+    <!-- よく出る用語 -->
+    <section class="terms" id="termsBox" hidden>
+      <h2 class="sec-title">ぼやきに出てきた用語</h2>
+      <div class="chips" id="termChips"></div>
+    </section>
+
+    <!-- メモ -->
+    <section class="memos" id="memosBox" hidden>
+      <div class="sec-head">
+        <h2 class="sec-title" id="memosTitle">メモ</h2>
+        <button type="button" class="link-btn" id="clearFilter" hidden>絞り込みを解く</button>
+      </div>
+      <ul class="b-list" id="memoList"></ul>
+    </section>
+
+    <section class="first" id="firstBox">
+      <ol class="intro-steps">
+        <li>ボタンを押して、今日やったことを思い出しながら話します。黙ると自動で止まります。</li>
+        <li>製品名や略語ごと文字になって、用語つきで溜まります。</li>
+        <li>溜まったら Claude に渡すと、あやふやな所を見つけて、聞き直し用の教材にしてくれます。渡さなくても、メモ帳として使えます。</li>
+      </ol>
+    </section>
+  </main>
+
+  <div class="dock b-dock" id="dock" hidden>
+    <button type="button" class="btn btn-solid" id="handoffBtn">Claude に渡す文面をコピー</button>
+    <button type="button" class="btn" id="openImport">返ってきた教材を読み込む</button>
+    <p class="hint" id="handoffState" role="status"></p>
+  </div>
+</div>
+
+<!-- 教材の読み込み -->
+<dialog class="sheet" id="importSheet" aria-labelledby="importTitle">
+  <div class="sheet-head">
+    <h2 id="importTitle">教材を読み込む</h2>
+    <button type="button" class="link-btn" data-close>閉じる</button>
+  </div>
+  <p class="sheet-note">Claude が返した JSON を貼り付けます。「聞く」の教材が、この内容に入れ替わります。</p>
+  <textarea id="importText" rows="8" placeholder='{ "title": "…", "terms": […], "cards": […] }' spellcheck="false"></textarea>
+  <div class="sheet-actions">
+    <button type="button" class="btn btn-solid" id="importSave">読み込んで「聞く」を開く</button>
+    <p class="hint" id="importState" role="status"></p>
+  </div>
+</dialog>
+
+<!-- 設定 -->
+<dialog class="sheet" id="settingsSheet" aria-labelledby="settingsTitle">
+  <div class="sheet-head">
+    <h2 id="settingsTitle">設定</h2>
+    <button type="button" class="link-btn" data-close>閉じる</button>
+  </div>
+
+  <section class="set">
+    <h3>AmiVoice</h3>
+    <p class="sheet-note">AmiVoice API の APPKEY が必要です。キーはこの端末のブラウザにだけ保存します。「聞く」と共通です。</p>
+    <label class="field">
+      <span>APPKEY</span>
+      <input type="password" id="appkey" autocomplete="off" spellcheck="false" placeholder="マイページで発行したキー">
+    </label>
+    <div class="row"><button type="button" class="btn btn-solid" id="saveKey">キーを保存</button></div>
+    <p class="hint" id="keyState" role="status"></p>
+    <label class="check"><input type="checkbox" id="optNolog"><span><b>音声をサーバーに残さない</b><br>ログ保存なしの接続先を使います（料金が変わります）。</span></label>
+    <p class="hint" id="usage"></p>
+  </section>
+
+  <section class="set">
+    <h3>止まり方</h3>
+    <label class="field">
+      <span>黙ってから止まるまで</span>
+      <select id="optSilence">
+        <option value="5">5秒</option>
+        <option value="8">8秒</option>
+        <option value="15">15秒</option>
+        <option value="0">自分で止める</option>
+      </select>
+    </label>
+    <p class="sheet-note">1回のぼやきは最長3分です。</p>
+  </section>
+
+  <section class="set">
+    <h3>登録する用語</h3>
+    <p class="sheet-note" id="dictInfo"></p>
+    <label class="field">
+      <span>一度に登録する数</span>
+      <select id="optWords">
+        <option value="27">27語</option>
+        <option value="50">50語</option>
+        <option value="0">全部</option>
+        <option value="-1">登録しない（比較用）</option>
+      </select>
+    </label>
+    <p class="sheet-note">自分で足した用語、ぼやきによく出る用語の順に登録します。うまく始まらないときは数を減らしてください。</p>
+    <label class="field">
+      <span>用語を足す（1行に「表記,よみ」）</span>
+      <textarea id="extraWords" rows="4" placeholder="Fargate,ふぁーげーと&#10;Aurora,おーろら" spellcheck="false"></textarea>
+    </label>
+    <div class="row"><button type="button" class="btn" id="saveWords">用語を保存</button></div>
+    <p class="hint" id="wordsState" role="status"></p>
+  </section>
+
+  <section class="set">
+    <h3>メモ</h3>
+    <div class="row">
+      <button type="button" class="btn" id="copyAll">全部のメモをテキストでコピー</button>
+      <button type="button" class="btn btn-danger" id="clearAll">メモを全部消す</button>
+    </div>
+    <p class="hint" id="memoState" role="status"></p>
+  </section>
+</dialog>
+
+<script src="vendor/amivoice-wrp.js"></script>
+<script src="boyaki.js"></script>
+</body>
+</html>
