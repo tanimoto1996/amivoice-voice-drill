@@ -141,7 +141,7 @@ function forSpeech(text) {
   return out;
 }
 // profileWords（そのセッションだけ有効な単語登録）: 「表記 読み」を | で連結
-var wordCap = 100; // 一度に登録する語数。多すぎて始められなかったら 27 語に絞る
+var wordCap = 27; // 一度に登録する語数。実機で動作を確かめた 27 語までにする
 function profileWords(terms, cap) {
   return terms.map(function (t) {
     var w = t.w.replace(/ /g, "_");
@@ -261,13 +261,13 @@ var ASR = (function () {
     if (window.AIZUCHI_MOCK_ASR) return window.AIZUCHI_MOCK_ASR(opts);
     return idle.then(function () {
       return new Promise(function (resolve) {
-        var done = false, live = false, speaking = false, finals = [], timer = null, tail = null;
+        var done = false, live = false, speaking = false, spoke = false, finals = [], timer = null, tail = null;
         function finish(extra) {
           if (done) return;
           done = true; cur = null;
           clearTimeout(timer); clearTimeout(tail);
           try { Wrp.feedDataPause(); } catch (e) {}
-          var out = { text: "", reading: "", conf: -1 };
+          var out = { text: "", reading: "", conf: -1, live: live, spoke: spoke, words: opts.words ? opts.words.split("|").length : 0 };
           if (finals.length) {
             out.text = finals.map(function (f) { return f.text; }).join("");
             out.reading = finals.map(function (f) { return f.reading; }).join("");
@@ -287,7 +287,7 @@ var ASR = (function () {
             if (opts.onLive) opts.onLive();
             timer = setTimeout(onTimeout, opts.ms);
           },
-          onSpeech: function (on) { speaking = on; if (on) clearTimeout(tail); },
+          onSpeech: function (on) { speaking = on; if (on) { spoke = true; clearTimeout(tail); } },
           onPartial: opts.onPartial,
           onFinal: function (r) {
             if (!r.text) return;
@@ -859,7 +859,12 @@ function bind() {
     st.className = "hint"; st.textContent = "接続中…";
     var r = await ASR.listen({ ms: 7000, words: profileWords(deck.terms, wordCap), onLive: function () { st.textContent = "どうぞ。「なるほど」や用語を言ってみてください。"; } });
     if (r.error) { st.className = "hint bad"; st.textContent = r.error; return; }
-    if (!r.text) { st.textContent = "何も聞き取れませんでした。マイクに近づいてもう一度。"; return; }
+    if (!r.text) {
+      st.className = "hint bad";
+      st.textContent = (r.spoke ? "声は検出しましたが、文字になりませんでした。" : "マイクに声が入っていません。ほかのアプリがマイクを使っていないか、端末のマイク許可を確認してください。")
+        + "（接続:" + (r.live ? "OK" : "未完了") + "／登録語:" + r.words + "）";
+      return;
+    }
     var act = detectIntent(r), term = findLookup(r);
     if (term) act = "「" + term.w + "」を引く";
     renderSettings(); // 使った時間の表示を更新
