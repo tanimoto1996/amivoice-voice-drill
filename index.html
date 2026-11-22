@@ -19,9 +19,8 @@
   <header class="top">
     <h1 class="brand">あいづちラジオ</h1>
     <nav class="top-nav" aria-label="メニュー">
-      <a class="link-btn" href="boyaki.html">ぼやく</a>
       <button type="button" class="link-btn" id="openList">一覧</button>
-      <button type="button" class="link-btn" id="openMemo">メモ<span class="count" id="memoCount" hidden></span></button>
+      <button type="button" class="link-btn" id="openMemo">ぼやき<span class="count" id="memoCount" hidden></span></button>
       <button type="button" class="link-btn" id="openSettings">設定</button>
     </nav>
   </header>
@@ -41,8 +40,8 @@
       <p class="intro-lead">解説を耳で聞く。<br>返事は、あいづちだけ。</p>
       <ol class="intro-steps">
         <li>再生すると、1枚ずつ「場面 → 要点 → なぜ → ひっかけ」の順に読み上げます。</li>
-        <li>聞き終わったら「なるほど」か「わからん」。声でもボタンでも返せます。「わからん」の1枚は、少し先でもう一度流れます。</li>
-        <li>声を入にすると、要点を言い返す時間が入ります。「Canary って何」のように用語を言えば、その説明を読み上げます。</li>
+        <li>聞いた1枚について「ぼやく」を押し、自分の言葉で言ってみます。用語ごと文字になって、その1枚に残ります。</li>
+        <li>溜まったぼやきをカードと並べて Claude に渡すと、間違いやあやふやな所を見つけて、補足の教材にしてくれます。</li>
       </ol>
       <p class="intro-deck" id="introDeck"></p>
     </div>
@@ -65,6 +64,11 @@
         <p class="lookup-term" id="lookupTerm"></p>
         <div class="seg" data-k="lookup" id="segLookup"></div>
       </div>
+      <div class="by" id="boyakiBox" hidden>
+        <span class="tag tag-by">この1枚のぼやき</span>
+        <div class="chips" id="boyakiChips"></div>
+        <ul class="by-list" id="boyakiList"></ul>
+      </div>
       <div class="echo" id="echoBox" hidden>
         <span class="tag tag-echo">声に出す</span>
         <div class="chips" id="echoChips"></div>
@@ -78,7 +82,7 @@
       <div class="outro-actions">
         <button type="button" class="btn btn-solid" id="againLost">わからんだけ、もう一周</button>
         <button type="button" class="btn" id="againAll">最初から流す</button>
-        <button type="button" class="btn" id="outroHandoff">わからんとメモを AI に渡す</button>
+        <button type="button" class="btn" id="outroHandoff">ぼやきを Claude に渡す</button>
       </div>
     </div>
   </main>
@@ -94,7 +98,7 @@
     <button type="button" class="reply reply-ok" data-act="ok"><span class="say">なるほど</span><span class="does">次の1枚へ</span></button>
     <button type="button" class="reply reply-again" data-act="again"><span class="say">もう一回</span><span class="does">頭から聞き直す</span></button>
     <button type="button" class="reply reply-lost" data-act="lost"><span class="say">わからん</span><span class="does">かみくだいて聞く</span></button>
-    <button type="button" class="reply reply-memo" data-act="memo"><span class="say">メモ</span><span class="does">疑問を残す</span></button>
+    <button type="button" class="reply reply-memo" data-act="memo"><span class="say">ぼやく</span><span class="does">自分の言葉で言う</span></button>
   </div>
 
   <footer class="deck-bar">
@@ -134,14 +138,14 @@
 <!-- メモ -->
 <dialog class="sheet" id="memoSheet" aria-labelledby="memoTitle">
   <div class="sheet-head">
-    <h2 id="memoTitle">メモ</h2>
+    <h2 id="memoTitle">ぼやき</h2>
     <button type="button" class="link-btn" data-close>閉じる</button>
   </div>
-  <p class="sheet-note">聞いている途中の疑問を残す場所です。「わからん」の1枚と一緒に AI へ渡すと、補足の教材を作れます。</p>
+  <p class="sheet-note">カードごとに声で残したぼやきです。カードの内容と並べて Claude に渡すと、間違いやあやふやな所を見つけて、補足の教材にしてくれます。</p>
   <ul class="memo-list" id="memoList"></ul>
-  <p class="empty" id="memoEmpty">まだメモはありません。再生中に「メモ」と言うか、メモのボタンを押すと残せます。</p>
+  <p class="empty" id="memoEmpty">まだぼやきはありません。1枚聞いたら「ぼやく」を押して、自分の言葉で言ってみてください。</p>
   <div class="sheet-actions">
-    <button type="button" class="btn btn-solid" id="handoffBtn">わからんとメモを AI に渡す文面をコピー</button>
+    <button type="button" class="btn btn-solid" id="handoffBtn">ぼやきを Claude に渡す文面をコピー</button>
     <span class="hint" id="handoffState" role="status"></span>
   </div>
 </dialog>
@@ -149,12 +153,12 @@
 <!-- メモ入力（手入力） -->
 <dialog class="sheet sheet-small" id="memoInput" aria-labelledby="memoInputTitle">
   <div class="sheet-head">
-    <h2 id="memoInputTitle">メモを残す</h2>
+    <h2 id="memoInputTitle">ぼやきを書く</h2>
     <button type="button" class="link-btn" data-close>やめる</button>
   </div>
-  <textarea id="memoText" rows="4" placeholder="例：Canary と Linear の違いは？"></textarea>
+  <textarea id="memoText" rows="4" placeholder="声が使えないときは、ここに書いて残せます"></textarea>
   <div class="sheet-actions">
-    <button type="button" class="btn btn-solid" id="memoSave">メモを残す</button>
+    <button type="button" class="btn btn-solid" id="memoSave">ぼやきを残す</button>
   </div>
 </dialog>
 
@@ -177,7 +181,7 @@
       <button type="button" class="btn" id="testMic">マイクを試す</button>
     </div>
     <p class="hint" id="keyState" role="status"></p>
-    <label class="check"><input type="checkbox" id="optEcho"><span><b>要点を声に出す</b><br>解説のあと、要点を言い返します。言えた用語が点灯し、抜けた用語は「苦手な用語」に残ります。</span></label>
+    <label class="check"><input type="checkbox" id="optEcho"><span><b>要点を毎回言い返す</b><br>「声で返す」が入のとき、解説のあとに要点を言い返す時間を入れます。抜けた用語は「苦手な用語」に残ります。</span></label>
     <label class="check"><input type="checkbox" id="optNolog"><span><b>音声をサーバーに残さない</b><br>ログ保存なしの接続先を使います（料金が変わります）。</span></label>
     <p class="hint" id="usage"></p>
   </section>
